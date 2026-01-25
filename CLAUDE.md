@@ -9,13 +9,13 @@ This file provides guidance to Claude Code when working with this codebase.
 1. **Medication dose tracking** - Log when medication is taken, with a timer showing elapsed time and 2-hour notification reminders
 2. **Custom habit tracking** - Track any behavior (exercise, reading, etc.) with "increase" or "decrease" goals
 3. **Historical data** - View and edit past entries, see trends over time
-4. **Cloud sync** - iCloud backup and sync across Apple devices (planned)
+4. **Cloud sync** - iCloud backup and sync across Apple devices
 
 ## Tech Stack
 
 - **Framework**: Expo SDK 54 with React Native 0.81
 - **Navigation**: expo-router (file-based routing)
-- **Storage**: AsyncStorage (local) + iCloud (cloud sync - planned)
+- **Storage**: AsyncStorage (local) + iCloud (cloud sync)
 - **Identity**: Local UUID (no external auth service)
 - **Charts**: react-native-chart-kit with react-native-svg
 - **Notifications**: expo-notifications
@@ -27,7 +27,7 @@ This file provides guidance to Claude Code when working with this codebase.
 The app prioritizes offline functionality:
 
 1. All data operations write to **AsyncStorage first**
-2. iCloud syncs data across user's Apple devices automatically (planned)
+2. iCloud syncs data across user's Apple devices automatically
 3. Uses **last-write-wins** merge strategy for conflict resolution
 4. Soft deletes (sets `deleted: true`) to handle sync edge cases
 
@@ -70,7 +70,8 @@ contexts/
 lib/
 ├── types.ts             # TypeScript interfaces (Habit, HabitLog, DoseLog)
 ├── storage.ts           # AsyncStorage CRUD with background sync
-├── sync.ts              # iCloud sync logic (placeholder)
+├── sync.ts              # iCloud sync logic and data merging
+├── icloud.ts            # iCloud key-value storage wrapper
 └── auth.ts              # Local UUID generation and management
 ```
 
@@ -142,4 +143,4 @@ interface DoseLog {
 
 4. **Tab Navigation**: Uses Expo Router's group-based routing with `(tabs)` directory
 
-5. **iCloud Sync**: Planned feature - data will sync automatically when iCloud is enabled on the device
+5. **iCloud Sync**: Uses `expo-icloud-storage` for NSUbiquitousKeyValueStore. Syncs on app startup and foreground. Shows "Local only" when iCloud unavailable

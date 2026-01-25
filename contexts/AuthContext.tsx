@@ -1,15 +1,9 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { FirebaseAuthTypes } from '@react-native-firebase/auth';
-import {
-  signInAnonymously,
-  getCurrentUser,
-  onAuthStateChanged,
-  getSavedUserId,
-} from '@/lib/auth';
-import { syncAllData, SyncStatus } from '@/lib/sync';
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
+import { AppState, AppStateStatus } from 'react-native';
+import { initializeUser, getCurrentUserId } from '@/lib/auth';
+import { syncAllData, setupICloudSync, isICloudSyncAvailable, SyncStatus } from '@/lib/sync';
 
 interface AuthContextType {
-  user: FirebaseAuthTypes.User | null;
   userId: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
@@ -20,66 +14,99 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<FirebaseAuthTypes.User | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
+  const appState = useRef(AppState.currentState);
 
-  // Initialize auth on mount
+  // Initialize local identity and iCloud on mount
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(async (firebaseUser) => {
-      setUser(firebaseUser);
+    const init = async () => {
+      try {
+        // Initialize local user identity
+        const id = await initializeUser();
+        setUserId(id);
 
-      if (firebaseUser) {
-        // User is signed in, trigger initial sync
+        // Initialize iCloud sync
+        const icloudAvailable = await setupICloudSync();
+
+        if (!icloudAvailable) {
+          // iCloud not available - set status and continue
+          setSyncStatus('unavailable');
+          setIsLoading(false);
+          return;
+        }
+
+        // Trigger initial sync
         setSyncStatus('syncing');
         try {
-          await syncAllData(firebaseUser.uid);
+          await syncAllData(id);
           setSyncStatus('synced');
         } catch (error) {
           console.error('Initial sync failed:', error);
           setSyncStatus('error');
         }
-      }
-
-      setIsLoading(false);
-    });
-
-    // Auto sign-in anonymously on app launch
-    const initAuth = async () => {
-      try {
-        const currentUser = getCurrentUser();
-        if (!currentUser) {
-          await signInAnonymously();
-        }
       } catch (error) {
-        console.error('Auto sign-in failed:', error);
+        console.error('Failed to initialize user:', error);
+        setSyncStatus('error');
+      } finally {
         setIsLoading(false);
       }
     };
 
-    initAuth();
+    init();
+  }, []);
 
-    return unsubscribe;
+  // Sync when app comes to foreground
+  useEffect(() => {
+    const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+      // App is coming to foreground
+      if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
+        const currentUserId = getCurrentUserId();
+        if (currentUserId && isICloudSyncAvailable()) {
+          setSyncStatus('syncing');
+          try {
+            await syncAllData(currentUserId);
+            setSyncStatus('synced');
+          } catch (error) {
+            console.error('Foreground sync failed:', error);
+            setSyncStatus('error');
+          }
+        }
+      }
+      appState.current = nextAppState;
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+
+    return () => {
+      subscription.remove();
+    };
   }, []);
 
   const triggerSync = useCallback(async () => {
-    if (!user) return;
+    const currentUserId = getCurrentUserId();
+    if (!currentUserId) return;
+
+    if (!isICloudSyncAvailable()) {
+      setSyncStatus('unavailable');
+      return;
+    }
 
     setSyncStatus('syncing');
     try {
-      await syncAllData(user.uid);
+      await syncAllData(currentUserId);
       setSyncStatus('synced');
     } catch (error) {
       console.error('Manual sync failed:', error);
       setSyncStatus('error');
     }
-  }, [user]);
+  }, []);
 
   const value: AuthContextType = {
-    user,
-    userId: user?.uid ?? null,
+    userId,
     isLoading,
-    isAuthenticated: !!user,
+    isAuthenticated: !!userId,
     syncStatus,
     triggerSync,
   };

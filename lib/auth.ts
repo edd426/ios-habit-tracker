@@ -1,69 +1,65 @@
-import auth, { FirebaseAuthTypes } from '@react-native-firebase/auth';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const USER_ID_KEY = 'firebase_user_id';
+const USER_ID_KEY = 'device_user_id';
+
+// In-memory cache for the user ID (set after initialization)
+let cachedUserId: string | null = null;
 
 /**
- * Sign in anonymously. Creates a new anonymous account if none exists.
- * Returns the user object on success.
+ * Generate a unique user ID using crypto.randomUUID or fallback.
  */
-export async function signInAnonymously(): Promise<FirebaseAuthTypes.User> {
-  const currentUser = auth().currentUser;
+function generateUserId(): string {
+  // Use crypto.randomUUID if available (React Native 0.64+)
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // Fallback: generate UUID v4 manually
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
-  if (currentUser) {
-    // Already signed in
-    await saveUserId(currentUser.uid);
-    return currentUser;
+/**
+ * Initialize the local user identity.
+ * Creates a new UUID if none exists, otherwise loads the existing one.
+ * Returns the user ID.
+ */
+export async function initializeUser(): Promise<string> {
+  // Check if we already have a user ID stored
+  let userId = await AsyncStorage.getItem(USER_ID_KEY);
+
+  if (!userId) {
+    // Generate a new user ID
+    userId = generateUserId();
+    await AsyncStorage.setItem(USER_ID_KEY, userId);
   }
 
-  // Sign in anonymously
-  const userCredential = await auth().signInAnonymously();
-  await saveUserId(userCredential.user.uid);
-  return userCredential.user;
+  // Cache it for synchronous access
+  cachedUserId = userId;
+  return userId;
 }
 
 /**
- * Get the current user's UID, or null if not signed in.
+ * Get the current user's ID, or null if not initialized.
+ * This is synchronous and returns the cached value.
  */
 export function getCurrentUserId(): string | null {
-  return auth().currentUser?.uid ?? null;
-}
-
-/**
- * Get the current user object.
- */
-export function getCurrentUser(): FirebaseAuthTypes.User | null {
-  return auth().currentUser;
-}
-
-/**
- * Subscribe to auth state changes.
- */
-export function onAuthStateChanged(
-  callback: (user: FirebaseAuthTypes.User | null) => void
-): () => void {
-  return auth().onAuthStateChanged(callback);
-}
-
-/**
- * Save user ID to AsyncStorage for recovery purposes.
- * This allows the user to see their ID in Settings if they need to recover their account.
- */
-async function saveUserId(uid: string): Promise<void> {
-  await AsyncStorage.setItem(USER_ID_KEY, uid);
+  return cachedUserId;
 }
 
 /**
  * Get the saved user ID from AsyncStorage.
- * Useful for displaying in Settings for recovery purposes.
+ * Useful for displaying in Settings.
  */
 export async function getSavedUserId(): Promise<string | null> {
   return AsyncStorage.getItem(USER_ID_KEY);
 }
 
 /**
- * Sign out the current user.
+ * Check if the user has been initialized.
  */
-export async function signOut(): Promise<void> {
-  await auth().signOut();
+export function isInitialized(): boolean {
+  return cachedUserId !== null;
 }

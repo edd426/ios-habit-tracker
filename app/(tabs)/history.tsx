@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -34,7 +34,8 @@ export default function HistoryScreen() {
   // Modal states
   const [showTimePicker, setShowTimePicker] = useState(false);
   const [timePickerValue, setTimePickerValue] = useState(new Date());
-  const [baseDate, setBaseDate] = useState(new Date()); // The date portion to preserve
+  const [timePickerKey, setTimePickerKey] = useState(0); // Force re-mount picker
+  const selectedTimeRef = useRef(new Date()); // Track selection without re-render
   const [editingLog, setEditingLog] = useState<{ type: 'habit' | 'dose'; id: string } | null>(null);
   const [addingForHabit, setAddingForHabit] = useState<string | null>(null);
   const [addingDose, setAddingDose] = useState(false);
@@ -120,39 +121,42 @@ export default function HistoryScreen() {
   const handleEditLog = (type: 'habit' | 'dose', id: string, timestamp: number) => {
     const originalTime = new Date(timestamp);
     setEditingLog({ type, id });
-    setBaseDate(originalTime);
     setTimePickerValue(originalTime);
-    setTimeout(() => setShowTimePicker(true), 50); // Small delay to ensure state is set
+    selectedTimeRef.current = originalTime;
+    setTimePickerKey(k => k + 1); // Force fresh picker instance
+    setTimeout(() => setShowTimePicker(true), 50);
   };
 
   const handleTimePickerChange = (_e: any, date?: Date) => {
     if (date) {
-      // Combine the time from the picker with the base date
-      const newDateTime = new Date(baseDate);
+      // Store in ref to avoid re-render during scroll
+      // Combine selected time with the original date
+      const newDateTime = new Date(timePickerValue);
       newDateTime.setHours(date.getHours(), date.getMinutes(), 0, 0);
-      setTimePickerValue(newDateTime);
+      selectedTimeRef.current = newDateTime;
     }
   };
 
   const handleTimePickerDone = async () => {
     setShowTimePicker(false);
+    const finalTime = selectedTimeRef.current.getTime();
     if (editingLog) {
       // Updating existing log
       if (editingLog.type === 'habit') {
-        await updateLog(editingLog.id, { timestamp: timePickerValue.getTime() });
+        await updateLog(editingLog.id, { timestamp: finalTime });
       } else {
-        await updateDoseLog(editingLog.id, { timestamp: timePickerValue.getTime() });
+        await updateDoseLog(editingLog.id, { timestamp: finalTime });
       }
       setEditingLog(null);
       loadData();
     } else if (addingDose) {
       // Adding new dose
-      await logDose(timePickerValue.getTime());
+      await logDose(finalTime);
       setAddingDose(false);
       loadData();
     } else if (addingForHabit) {
       // Adding new habit log - show quantity modal
-      setPendingAddTime(timePickerValue.getTime());
+      setPendingAddTime(finalTime);
       setShowQuantityModal(true);
     }
   };
@@ -212,8 +216,9 @@ export default function HistoryScreen() {
     } else {
       defaultTime.setHours(12, 0, 0, 0);
     }
-    setBaseDate(defaultTime);
     setTimePickerValue(defaultTime);
+    selectedTimeRef.current = defaultTime;
+    setTimePickerKey(k => k + 1); // Force fresh picker instance
     setTimeout(() => setShowTimePicker(true), 50);
   };
 
@@ -226,8 +231,9 @@ export default function HistoryScreen() {
     } else {
       defaultTime.setHours(12, 0, 0, 0);
     }
-    setBaseDate(defaultTime);
     setTimePickerValue(defaultTime);
+    selectedTimeRef.current = defaultTime;
+    setTimePickerKey(k => k + 1); // Force fresh picker instance
     setTimeout(() => setShowTimePicker(true), 50);
   };
 
@@ -383,6 +389,7 @@ export default function HistoryScreen() {
               </TouchableOpacity>
             </View>
             <DateTimePicker
+              key={timePickerKey}
               value={timePickerValue}
               mode="time"
               display="spinner"

@@ -32,6 +32,13 @@ export function SyncStatus({ status, onPress }: SyncStatusProps) {
           color: '#e74c3c',
           showSpinner: false,
         };
+      case 'unavailable':
+        return {
+          icon: 'database' as const,
+          text: 'Local only',
+          color: '#888',
+          showSpinner: false,
+        };
       default:
         return {
           icon: 'cloud-upload' as const,
