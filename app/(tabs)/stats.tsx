@@ -8,9 +8,20 @@ import { Habit } from '@/lib/types';
 
 const screenWidth = Dimensions.get('window').width;
 
+type TimeRange = '14d' | '30d' | '90d' | '1y' | 'all';
+
+const TIME_RANGES: { key: TimeRange; label: string; days: number | null }[] = [
+  { key: '14d', label: '2W', days: 14 },
+  { key: '30d', label: '1M', days: 30 },
+  { key: '90d', label: '3M', days: 90 },
+  { key: '1y', label: '1Y', days: 365 },
+  { key: 'all', label: 'All', days: null },
+];
+
 export default function StatsScreen() {
   const [habits, setHabits] = useState<Habit[]>([]);
   const [selectedHabitId, setSelectedHabitId] = useState<string | null>(null);
+  const [selectedTimeRange, setSelectedTimeRange] = useState<TimeRange>('14d');
   const [chartData, setChartData] = useState<{ labels: string[]; data: number[] }>({ labels: [], data: [] });
   const [stats, setStats] = useState({ thisWeek: 0, lastWeek: 0, total: 0 });
   const [doseStats, setDoseStats] = useState({ total: 0, thisWeek: 0 });
@@ -35,9 +46,35 @@ export default function StatsScreen() {
   const loadChartData = useCallback(async () => {
     if (!selectedHabitId) return;
 
-    const dailyCounts = await getDailyCountsForHabit(selectedHabitId, 14);
-    const labels = dailyCounts.map(d => {
+    const selectedRange = TIME_RANGES.find(r => r.key === selectedTimeRange);
+    let days = selectedRange?.days ?? 14;
+
+    // For "all", calculate days since habit creation
+    if (selectedTimeRange === 'all') {
+      const habit = habits.find(h => h.id === selectedHabitId);
+      if (habit) {
+        const daysSinceCreation = Math.ceil((Date.now() - habit.createdAt) / (24 * 60 * 60 * 1000));
+        days = Math.max(daysSinceCreation, 7); // At least 7 days
+      }
+    }
+
+    const dailyCounts = await getDailyCountsForHabit(selectedHabitId, days);
+
+    // Determine label interval based on range
+    let labelInterval = 1;
+    if (days <= 14) labelInterval = 2;
+    else if (days <= 30) labelInterval = 5;
+    else if (days <= 90) labelInterval = 14;
+    else if (days <= 365) labelInterval = 30;
+    else labelInterval = 60;
+
+    const labels = dailyCounts.map((d, i) => {
+      if (i % labelInterval !== 0 && i !== dailyCounts.length - 1) return '';
       const date = new Date(d.date);
+      if (days > 90) {
+        // Show month abbreviation for longer ranges
+        return date.toLocaleDateString('en-US', { month: 'short' });
+      }
       return `${date.getMonth() + 1}/${date.getDate()}`;
     });
     const data = dailyCounts.map(d => d.count);
@@ -56,7 +93,7 @@ export default function StatsScreen() {
       thisWeek: habitLogs.filter(l => l.timestamp >= weekAgo).length,
       lastWeek: habitLogs.filter(l => l.timestamp >= twoWeeksAgo && l.timestamp < weekAgo).length,
     });
-  }, [selectedHabitId]);
+  }, [selectedHabitId, selectedTimeRange, habits]);
 
   useFocusEffect(
     useCallback(() => {
@@ -114,10 +151,33 @@ export default function StatsScreen() {
           {selectedHabit && chartData.data.length > 0 && (
             <>
               <View style={styles.chartCard}>
-                <Text style={styles.cardTitle}>Last 14 Days</Text>
+                <View style={styles.chartHeader}>
+                  <Text style={styles.cardTitle}>Trend</Text>
+                  <View style={styles.timeRangeSelector}>
+                    {TIME_RANGES.map(range => (
+                      <TouchableOpacity
+                        key={range.key}
+                        style={[
+                          styles.timeRangeChip,
+                          selectedTimeRange === range.key && styles.timeRangeChipActive,
+                        ]}
+                        onPress={() => setSelectedTimeRange(range.key)}
+                      >
+                        <Text
+                          style={[
+                            styles.timeRangeText,
+                            selectedTimeRange === range.key && styles.timeRangeTextActive,
+                          ]}
+                        >
+                          {range.label}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
                 <LineChart
                   data={{
-                    labels: chartData.labels.filter((_, i) => i % 2 === 0),
+                    labels: chartData.labels,
                     datasets: [{ data: chartData.data.length > 0 ? chartData.data : [0] }],
                   }}
                   width={screenWidth - 48}
@@ -220,6 +280,33 @@ const styles = StyleSheet.create({
     padding: 16,
     backgroundColor: '#16213e',
     borderRadius: 12,
+  },
+  chartHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  timeRangeSelector: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  timeRangeChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#1a1a2e',
+  },
+  timeRangeChipActive: {
+    backgroundColor: '#4a69bd',
+  },
+  timeRangeText: {
+    fontSize: 12,
+    color: '#666',
+    fontWeight: '500',
+  },
+  timeRangeTextActive: {
+    color: '#fff',
   },
   chart: {
     marginLeft: -16,
