@@ -9,6 +9,7 @@ import {
   syncDeleteDoseLog,
 } from './sync';
 import { getCurrentUserId } from './auth';
+import { safeParse } from './safe-json';
 
 const KEYS = {
   HABITS: 'habits',
@@ -33,7 +34,7 @@ function backgroundSync<T>(syncFn: () => Promise<T>): void {
 // Habits
 export async function getHabits(): Promise<Habit[]> {
   const data = await AsyncStorage.getItem(KEYS.HABITS);
-  const habits: Habit[] = data ? JSON.parse(data) : [];
+  const habits: Habit[] = safeParse(data, []);
   // Filter out soft-deleted items
   return habits.filter((h) => !h.deleted);
 }
@@ -69,7 +70,7 @@ export async function updateHabit(
   updates: Partial<Omit<Habit, 'id' | 'createdAt'>>
 ): Promise<void> {
   const data = await AsyncStorage.getItem(KEYS.HABITS);
-  const habits: Habit[] = data ? JSON.parse(data) : [];
+  const habits: Habit[] = safeParse(data, []);
   const index = habits.findIndex((h) => h.id === id);
   if (index !== -1) {
     const updatedHabit = {
@@ -90,7 +91,7 @@ export async function updateHabit(
 
 export async function deleteHabit(id: string): Promise<void> {
   const data = await AsyncStorage.getItem(KEYS.HABITS);
-  const habits: Habit[] = data ? JSON.parse(data) : [];
+  const habits: Habit[] = safeParse(data, []);
   const filtered = habits.filter((h) => h.id !== id);
   await saveHabits(filtered);
 
@@ -116,7 +117,7 @@ export async function deleteHabit(id: string): Promise<void> {
 // Habit Logs
 export async function getHabitLogs(): Promise<HabitLog[]> {
   const data = await AsyncStorage.getItem(KEYS.HABIT_LOGS);
-  const logs: HabitLog[] = data ? JSON.parse(data) : [];
+  const logs: HabitLog[] = safeParse(data, []);
   // Filter out soft-deleted items
   return logs.filter((l) => !l.deleted);
 }
@@ -201,7 +202,7 @@ export async function getAllTodayCounts(): Promise<Record<string, number>> {
 // Dose Logs
 export async function getDoseLogs(): Promise<DoseLog[]> {
   const data = await AsyncStorage.getItem(KEYS.DOSE_LOGS);
-  const logs: DoseLog[] = data ? JSON.parse(data) : [];
+  const logs: DoseLog[] = safeParse(data, []);
   // Filter out soft-deleted items
   return logs.filter((l) => !l.deleted);
 }
@@ -249,7 +250,7 @@ export async function getLogsForDate(date: Date): Promise<HabitLog[]> {
 
 export async function updateLog(logId: string, updates: { timestamp?: number }): Promise<void> {
   const data = await AsyncStorage.getItem(KEYS.HABIT_LOGS);
-  const logs: HabitLog[] = data ? JSON.parse(data) : [];
+  const logs: HabitLog[] = safeParse(data, []);
   const index = logs.findIndex((l) => l.id === logId);
   if (index !== -1) {
     const updatedLog = {
@@ -296,7 +297,7 @@ export async function updateDoseLog(
   updates: { timestamp?: number }
 ): Promise<void> {
   const data = await AsyncStorage.getItem(KEYS.DOSE_LOGS);
-  const logs: DoseLog[] = data ? JSON.parse(data) : [];
+  const logs: DoseLog[] = safeParse(data, []);
   const index = logs.findIndex((l) => l.id === logId);
   if (index !== -1) {
     const updatedLog = {
@@ -325,6 +326,43 @@ export async function deleteDoseLog(logId: string): Promise<void> {
   if (userId) {
     backgroundSync(() => syncDeleteDoseLog(userId, logId));
   }
+}
+
+// Export
+export interface ExportPayload {
+  exportedAt: number;
+  exportedAtISO: string;
+  userId: string | null;
+  schemaVersion: 1;
+  habits: Habit[];
+  habitLogs: HabitLog[];
+  doseLogs: DoseLog[];
+  lastSync: number | null;
+}
+
+/**
+ * Build a full export of all locally-stored data (AsyncStorage source of truth).
+ * Includes soft-deleted rows so the export is a faithful snapshot.
+ */
+export async function buildExportPayload(): Promise<ExportPayload> {
+  const [habitsRaw, habitLogsRaw, doseLogsRaw, lastSyncRaw] = await Promise.all([
+    AsyncStorage.getItem(KEYS.HABITS),
+    AsyncStorage.getItem(KEYS.HABIT_LOGS),
+    AsyncStorage.getItem(KEYS.DOSE_LOGS),
+    AsyncStorage.getItem('last_sync_timestamp'),
+  ]);
+
+  const now = Date.now();
+  return {
+    exportedAt: now,
+    exportedAtISO: new Date(now).toISOString(),
+    userId: getCurrentUserId(),
+    schemaVersion: 1,
+    habits: safeParse<Habit[]>(habitsRaw, []),
+    habitLogs: safeParse<HabitLog[]>(habitLogsRaw, []),
+    doseLogs: safeParse<DoseLog[]>(doseLogsRaw, []),
+    lastSync: lastSyncRaw ? parseInt(lastSyncRaw, 10) : null,
+  };
 }
 
 // Stats helpers

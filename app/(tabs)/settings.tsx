@@ -17,7 +17,7 @@ import { useFocusEffect } from 'expo-router';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import * as Clipboard from 'expo-clipboard';
 
-import { getHabits, addHabit, updateHabit, deleteHabit } from '@/lib/storage';
+import { getHabits, addHabit, updateHabit, deleteHabit, buildExportPayload } from '@/lib/storage';
 import { Habit } from '@/lib/types';
 import { useAuth } from '@/contexts/AuthContext';
 import { SyncStatus } from '@/components/SyncStatus';
@@ -40,6 +40,25 @@ export default function SettingsScreen() {
     if (userId) {
       await Clipboard.setStringAsync(userId);
       Alert.alert('Copied', 'User ID copied to clipboard');
+    }
+  };
+
+  const handleExport = async () => {
+    try {
+      const payload = await buildExportPayload();
+      const json = JSON.stringify(payload, null, 2);
+      await Clipboard.setStringAsync(json);
+      const bytes = json.length;
+      const kb = (bytes / 1024).toFixed(1);
+      Alert.alert(
+        'Exported',
+        `Copied ${kb} KB to clipboard.\n\n` +
+          `Habits: ${payload.habits.length}\n` +
+          `Habit logs: ${payload.habitLogs.length}\n` +
+          `Dose logs: ${payload.doseLogs.length}`
+      );
+    } catch (e) {
+      Alert.alert('Export failed', String(e));
     }
   };
 
@@ -125,6 +144,19 @@ export default function SettingsScreen() {
           <Text style={styles.syncHint}>
             Save your User ID to recover your data if you reinstall the app
           </Text>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Export</Text>
+          <TouchableOpacity style={styles.exportRow} onPress={handleExport}>
+            <View style={styles.exportInfo}>
+              <Text style={styles.exportLabel}>Copy all data to clipboard</Text>
+              <Text style={styles.exportHint}>
+                JSON snapshot of habits, habit logs, and dose logs
+              </Text>
+            </View>
+            <FontAwesome name="copy" size={18} color="#888" />
+          </TouchableOpacity>
         </View>
 
         <View style={styles.section}>
@@ -435,5 +467,26 @@ const styles = StyleSheet.create({
     color: '#666',
     marginTop: 4,
     lineHeight: 18,
+  },
+  exportRow: {
+    backgroundColor: '#16213e',
+    borderRadius: 12,
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  exportInfo: {
+    flex: 1,
+    marginRight: 12,
+  },
+  exportLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  exportHint: {
+    fontSize: 12,
+    color: '#888',
+    marginTop: 4,
   },
 });

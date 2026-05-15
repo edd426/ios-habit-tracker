@@ -1,10 +1,38 @@
-import React, { useState, useCallback } from 'react';
-import { StyleSheet, ScrollView, View, Text, Dimensions, TouchableOpacity } from 'react-native';
+import React, { useState, useCallback, useMemo } from 'react';
+import {
+  StyleSheet,
+  ScrollView,
+  View,
+  Text,
+  Dimensions,
+  TouchableOpacity,
+} from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
 import { useFocusEffect } from 'expo-router';
 
-import { getHabits, getDailyCountsForHabit, getHabitLogs, getDoseLogs } from '@/lib/storage';
-import { Habit } from '@/lib/types';
+import {
+  loadAllForStats,
+  StatsLoad,
+  dailyCountsForHabit,
+  timeOfDayBuckets,
+  dayOfWeekBuckets,
+  medicatedWindowBuckets,
+  doseDayPermission,
+  rolling14d,
+  crossHabitOverlap,
+  interEventInterval,
+  toLocalDateKey,
+  toLocalDayStart,
+} from '@/lib/aggregations';
+import { Habit, HabitLog } from '@/lib/types';
+import ChartCard from '@/components/charts/ChartCard';
+import TimeOfDayChart from '@/components/charts/TimeOfDayChart';
+import DayOfWeekChart from '@/components/charts/DayOfWeekChart';
+import MedicatedWindowChart from '@/components/charts/MedicatedWindowChart';
+import DosePermissionChart from '@/components/charts/DosePermissionChart';
+import RollingIntensityChart from '@/components/charts/RollingIntensityChart';
+import CrossHabitChart from '@/components/charts/CrossHabitChart';
+import IntervalChart from '@/components/charts/IntervalChart';
 
 const screenWidth = Dimensions.get('window').width;
 
@@ -18,114 +46,245 @@ const TIME_RANGES: { key: TimeRange; label: string; days: number | null }[] = [
   { key: 'all', label: 'All', days: null },
 ];
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 export default function StatsScreen() {
-  const [habits, setHabits] = useState<Habit[]>([]);
+  const [load, setLoad] = useState<StatsLoad | null>(null);
   const [selectedHabitId, setSelectedHabitId] = useState<string | null>(null);
   const [selectedTimeRange, setSelectedTimeRange] = useState<TimeRange>('14d');
-  const [chartData, setChartData] = useState<{ labels: string[]; data: number[] }>({ labels: [], data: [] });
-  const [stats, setStats] = useState({ thisWeek: 0, lastWeek: 0, total: 0 });
-  const [doseStats, setDoseStats] = useState({ total: 0, thisWeek: 0 });
+  const [compareHabitId, setCompareHabitId] = useState<string | null>(null);
 
-  const loadHabits = useCallback(async () => {
-    const h = await getHabits();
-    setHabits(h);
-    if (h.length > 0 && !selectedHabitId) {
-      setSelectedHabitId(h[0].id);
+  const refresh = useCallback(async () => {
+    try {
+      const next = await loadAllForStats();
+      setLoad(next);
+      if (next.habits.length > 0 && !selectedHabitId) {
+        setSelectedHabitId(next.habits[0].id);
+      }
+    } catch (e) {
+      console.error('Stats load failed:', e);
     }
-
-    // Load medication dose stats
-    const doseLogs = await getDoseLogs();
-    const now = Date.now();
-    const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
-    setDoseStats({
-      total: doseLogs.length,
-      thisWeek: doseLogs.filter(l => l.timestamp >= weekAgo).length,
-    });
   }, [selectedHabitId]);
 
-  const loadChartData = useCallback(async () => {
-    if (!selectedHabitId) return;
+  useFocusEffect(
+    useCallback(() => {
+      refresh();
+    }, [refresh])
+  );
 
-    const selectedRange = TIME_RANGES.find(r => r.key === selectedTimeRange);
-    let days = selectedRange?.days ?? 14;
+  // === Derived values, all memoized ============================================
 
-    // For "all", calculate days since habit creation
+  const selectedHabit: Habit | undefined = useMemo(
+    () => load?.habits.find((h) => h.id === selectedHabitId),
+    [load, selectedHabitId]
+  );
+
+  const compareHabit: Habit | undefined = useMemo(
+    () => load?.habits.find((h) => h.id === compareHabitId),
+    [load, compareHabitId]
+  );
+
+  const otherHabits = useMemo(
+    () => load?.habits.filter((h) => h.id !== selectedHabitId) ?? [],
+    [load, selectedHabitId]
+  );
+
+  // Days for the selected time range — once
+  const rangeDays = useMemo(() => {
+    if (!load || !selectedHabitId) return 14;
+    const range = TIME_RANGES.find((r) => r.key === selectedTimeRange);
     if (selectedTimeRange === 'all') {
-      const habit = habits.find(h => h.id === selectedHabitId);
+      const habit = load.habits.find((h) => h.id === selectedHabitId);
       if (habit) {
-        const daysSinceCreation = Math.ceil((Date.now() - habit.createdAt) / (24 * 60 * 60 * 1000));
-        days = Math.max(daysSinceCreation, 7); // At least 7 days
+        const daysSinceCreation = Math.ceil((Date.now() - habit.createdAt) / DAY_MS);
+        return Math.max(daysSinceCreation, 7);
       }
+      return 30;
     }
+    return range?.days ?? 14;
+  }, [load, selectedHabitId, selectedTimeRange]);
 
-    const dailyCounts = await getDailyCountsForHabit(selectedHabitId, days);
+  // Range-filtered habit logs for the selected habit
+  const rangeHabitLogs: HabitLog[] = useMemo(() => {
+    if (!load || !selectedHabitId) return [];
+    const all = load.logsByHabit.get(selectedHabitId) ?? [];
+    const cutoff = Date.now() - rangeDays * DAY_MS;
+    return all.filter((l) => l.timestamp >= cutoff);
+  }, [load, selectedHabitId, rangeDays]);
 
-    // Determine label interval based on range
+  // Trend (existing)
+  const trendData = useMemo(() => {
+    if (!load || !selectedHabitId) return { labels: [] as string[], data: [] as number[] };
+    const counts = dailyCountsForHabit(load, selectedHabitId, rangeDays);
     let labelInterval = 1;
-    if (days <= 14) labelInterval = 2;
-    else if (days <= 30) labelInterval = 5;
-    else if (days <= 90) labelInterval = 14;
-    else if (days <= 365) labelInterval = 30;
+    if (rangeDays <= 14) labelInterval = 2;
+    else if (rangeDays <= 30) labelInterval = 5;
+    else if (rangeDays <= 90) labelInterval = 14;
+    else if (rangeDays <= 365) labelInterval = 30;
     else labelInterval = 60;
-
-    const labels = dailyCounts.map((d, i) => {
-      if (i % labelInterval !== 0 && i !== dailyCounts.length - 1) return '';
+    const labels = counts.map((d, i) => {
+      if (i % labelInterval !== 0 && i !== counts.length - 1) return '';
       const date = new Date(d.date);
-      if (days > 90) {
-        // Show month abbreviation for longer ranges
+      if (rangeDays > 90) {
         return date.toLocaleDateString('en-US', { month: 'short' });
       }
       return `${date.getMonth() + 1}/${date.getDate()}`;
     });
-    const data = dailyCounts.map(d => d.count);
+    return { labels, data: counts.map((c) => c.count) };
+  }, [load, selectedHabitId, rangeDays]);
 
-    setChartData({ labels, data });
-
-    // Calculate stats
-    const allLogs = await getHabitLogs();
-    const habitLogs = allLogs.filter(l => l.habitId === selectedHabitId);
+  // Summary
+  const summary = useMemo(() => {
+    if (!load || !selectedHabitId) return { thisWeek: 0, lastWeek: 0, total: 0 };
+    const all = load.logsByHabit.get(selectedHabitId) ?? [];
     const now = Date.now();
-    const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
-    const twoWeeksAgo = now - 14 * 24 * 60 * 60 * 1000;
+    const weekAgo = now - 7 * DAY_MS;
+    const twoWeeksAgo = now - 14 * DAY_MS;
+    return {
+      total: all.length,
+      thisWeek: all.filter((l) => l.timestamp >= weekAgo).length,
+      lastWeek: all.filter((l) => l.timestamp >= twoWeeksAgo && l.timestamp < weekAgo).length,
+    };
+  }, [load, selectedHabitId]);
 
-    setStats({
-      total: habitLogs.length,
-      thisWeek: habitLogs.filter(l => l.timestamp >= weekAgo).length,
-      lastWeek: habitLogs.filter(l => l.timestamp >= twoWeeksAgo && l.timestamp < weekAgo).length,
-    });
-  }, [selectedHabitId, selectedTimeRange, habits]);
+  const doseSummary = useMemo(() => {
+    if (!load) return { thisWeek: 0, total: 0 };
+    const now = Date.now();
+    const weekAgo = now - 7 * DAY_MS;
+    return {
+      total: load.doseLogs.length,
+      thisWeek: load.doseLogs.filter((l) => l.timestamp >= weekAgo).length,
+    };
+  }, [load]);
 
-  useFocusEffect(
-    useCallback(() => {
-      loadHabits();
-    }, [loadHabits])
+  // Time-of-day buckets (use range-filtered logs)
+  const todBuckets = useMemo(() => timeOfDayBuckets(rangeHabitLogs), [rangeHabitLogs]);
+  const dowBuckets = useMemo(() => dayOfWeekBuckets(rangeHabitLogs), [rangeHabitLogs]);
+
+  // Medicated-window — use ALL dose logs (a dose 13h before is still "the last one")
+  const medBuckets = useMemo(
+    () => medicatedWindowBuckets(rangeHabitLogs, load?.doseLogs ?? []),
+    [rangeHabitLogs, load]
   );
 
-  useFocusEffect(
-    useCallback(() => {
-      loadChartData();
-    }, [loadChartData])
-  );
+  // Dose-day permission — needs date sets over the full activity range
+  const permission = useMemo(() => {
+    if (!load || !selectedHabitId) {
+      return {
+        habitId: '',
+        onDoseDays: 0,
+        totalDoseDays: 0,
+        offDoseDays: 0,
+        totalNonDoseDays: 0,
+        onDoseRate: 0,
+        offDoseRate: 0,
+        ratio: 0,
+      };
+    }
+    // Build date sets from the load (already indexed)
+    const doseDates = new Set(load.doseLogs.map((d) => toLocalDateKey(d.timestamp)));
+    // All dates from first activity through today (closed range)
+    const firstTs =
+      Math.min(
+        load.habitLogs[0]?.timestamp ?? Date.now(),
+        load.doseLogs[0]?.timestamp ?? Date.now()
+      );
+    const allDateKeys = new Set<string>();
+    let cur = toLocalDayStart(firstTs);
+    const end = toLocalDayStart(Date.now());
+    while (cur <= end) {
+      allDateKeys.add(toLocalDateKey(cur));
+      cur += DAY_MS;
+    }
+    const logs = load.logsByHabit.get(selectedHabitId) ?? [];
+    return doseDayPermission(logs, doseDates, allDateKeys);
+  }, [load, selectedHabitId]);
 
-  const selectedHabit = habits.find(h => h.id === selectedHabitId);
+  // Rolling 14-day intensity — use the full habit log history
+  const rolling = useMemo(() => {
+    if (!load || !selectedHabitId) return [];
+    const logs = load.logsByHabit.get(selectedHabitId) ?? [];
+    if (logs.length === 0) return [];
+    const firstTs = logs[0].timestamp;
+    const lastTs = Date.now();
+    return rolling14d(logs, firstTs, lastTs);
+  }, [load, selectedHabitId]);
+
+  // Cross-habit overlap — over the full activity range
+  const overlap = useMemo(() => {
+    if (!load || !selectedHabitId || !compareHabitId) {
+      return { a_only: 0, b_only: 0, both: 0, neither: 0, total: 0 };
+    }
+    const logsA = load.logsByHabit.get(selectedHabitId) ?? [];
+    const logsB = load.logsByHabit.get(compareHabitId) ?? [];
+    // Use the union of dates from both habits (more meaningful than every day in range)
+    const dateSet = new Set<string>();
+    for (const l of logsA) dateSet.add(toLocalDateKey(l.timestamp));
+    for (const l of logsB) dateSet.add(toLocalDateKey(l.timestamp));
+    // Also add days from the full activity range so "neither" segments make sense
+    const firstTs = Math.min(
+      logsA[0]?.timestamp ?? Date.now(),
+      logsB[0]?.timestamp ?? Date.now()
+    );
+    let cur = toLocalDayStart(firstTs);
+    const end = toLocalDayStart(Date.now());
+    while (cur <= end) {
+      dateSet.add(toLocalDateKey(cur));
+      cur += DAY_MS;
+    }
+    return crossHabitOverlap(logsA, logsB, dateSet);
+  }, [load, selectedHabitId, compareHabitId]);
+
+  // Inter-event interval trend
+  const intervalPoints = useMemo(() => {
+    if (!load || !selectedHabitId) return [];
+    const logs = load.logsByHabit.get(selectedHabitId) ?? [];
+    return interEventInterval(logs, 30, 7);
+  }, [load, selectedHabitId]);
+
+  // === Defensive chart data sanitization (avoid chart-kit NaN/length-mismatch crashes) ===
+  const safeTrendData = useMemo(() => {
+    const data = trendData.data.length > 0
+      ? trendData.data.map((n) => (Number.isFinite(n) ? n : 0))
+      : [0];
+    const labels = trendData.labels.length === data.length
+      ? trendData.labels
+      : data.map(() => '');
+    return { labels, data };
+  }, [trendData]);
+
+  const habitColorRgb =
+    selectedHabit?.type === 'decrease' ? '231, 76, 60' : '46, 204, 113';
+
+  // === Render ===
+
+  if (!load) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyText}>Loading…</Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
-    <ScrollView style={styles.container}>
+    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 32 }}>
       <View style={styles.doseCard}>
         <Text style={styles.cardTitle}>Medication Doses</Text>
         <View style={styles.statsRow}>
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{doseStats.thisWeek}</Text>
+            <Text style={styles.statValue}>{doseSummary.thisWeek}</Text>
             <Text style={styles.statLabel}>This Week</Text>
           </View>
           <View style={styles.statItem}>
-            <Text style={styles.statValue}>{doseStats.total}</Text>
+            <Text style={styles.statValue}>{doseSummary.total}</Text>
             <Text style={styles.statLabel}>All Time</Text>
           </View>
         </View>
       </View>
 
-      {habits.length === 0 ? (
+      {load.habits.length === 0 ? (
         <View style={styles.emptyState}>
           <Text style={styles.emptyText}>No habits to show</Text>
           <Text style={styles.emptySubtext}>Add habits in Settings</Text>
@@ -134,13 +293,15 @@ export default function StatsScreen() {
         <>
           <View style={styles.habitSelector}>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              {habits.map(habit => (
+              {load.habits.map((habit) => (
                 <TouchableOpacity
                   key={habit.id}
                   style={[styles.habitChip, selectedHabitId === habit.id && styles.habitChipActive]}
                   onPress={() => setSelectedHabitId(habit.id)}
                 >
-                  <Text style={[styles.habitChipText, selectedHabitId === habit.id && styles.habitChipTextActive]}>
+                  <Text
+                    style={[styles.habitChipText, selectedHabitId === habit.id && styles.habitChipTextActive]}
+                  >
                     {habit.name}
                   </Text>
                 </TouchableOpacity>
@@ -148,37 +309,38 @@ export default function StatsScreen() {
             </ScrollView>
           </View>
 
-          {selectedHabit && chartData.data.length > 0 && (
+          {selectedHabit && (
             <>
-              <View style={styles.chartCard}>
-                <View style={styles.chartHeader}>
-                  <Text style={styles.cardTitle}>Trend</Text>
-                  <View style={styles.timeRangeSelector}>
-                    {TIME_RANGES.map(range => (
-                      <TouchableOpacity
-                        key={range.key}
+              {/* Trend (existing chart) */}
+              <ChartCard
+                title="Trend"
+                empty={safeTrendData.data.length === 0 || safeTrendData.data.every((n) => n === 0)}
+              >
+                <View style={styles.timeRangeSelector}>
+                  {TIME_RANGES.map((range) => (
+                    <TouchableOpacity
+                      key={range.key}
+                      style={[
+                        styles.timeRangeChip,
+                        selectedTimeRange === range.key && styles.timeRangeChipActive,
+                      ]}
+                      onPress={() => setSelectedTimeRange(range.key)}
+                    >
+                      <Text
                         style={[
-                          styles.timeRangeChip,
-                          selectedTimeRange === range.key && styles.timeRangeChipActive,
+                          styles.timeRangeText,
+                          selectedTimeRange === range.key && styles.timeRangeTextActive,
                         ]}
-                        onPress={() => setSelectedTimeRange(range.key)}
                       >
-                        <Text
-                          style={[
-                            styles.timeRangeText,
-                            selectedTimeRange === range.key && styles.timeRangeTextActive,
-                          ]}
-                        >
-                          {range.label}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
+                        {range.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
                 </View>
                 <LineChart
                   data={{
-                    labels: chartData.labels,
-                    datasets: [{ data: chartData.data.length > 0 ? chartData.data : [0] }],
+                    labels: safeTrendData.labels,
+                    datasets: [{ data: safeTrendData.data }],
                   }}
                   width={screenWidth - 48}
                   height={200}
@@ -192,39 +354,58 @@ export default function StatsScreen() {
                         ? `rgba(231, 76, 60, ${opacity})`
                         : `rgba(46, 204, 113, ${opacity})`,
                     labelColor: () => '#888',
-                    propsForDots: {
-                      r: '4',
-                    },
+                    propsForDots: { r: '4' },
                   }}
                   bezier
-                  style={styles.chart}
+                  style={{ marginLeft: -16, borderRadius: 8 }}
                 />
-              </View>
+              </ChartCard>
 
+              <RollingIntensityChart windows={rolling} color={habitColorRgb} />
+
+              <TimeOfDayChart buckets={todBuckets} color={habitColorRgb} />
+
+              <DayOfWeekChart buckets={dowBuckets} color={habitColorRgb} />
+
+              <MedicatedWindowChart buckets={medBuckets} />
+
+              <DosePermissionChart permission={permission} color={habitColorRgb} />
+
+              <CrossHabitChart
+                overlap={overlap}
+                habitA={selectedHabit}
+                habitB={compareHabit ?? null}
+                otherHabits={otherHabits}
+                onSelectB={setCompareHabitId}
+              />
+
+              <IntervalChart points={intervalPoints} color={habitColorRgb} />
+
+              {/* Summary (existing) */}
               <View style={styles.statsCard}>
                 <Text style={styles.cardTitle}>Summary</Text>
                 <View style={styles.statsRow}>
                   <View style={styles.statItem}>
-                    <Text style={styles.statValue}>{stats.thisWeek}</Text>
+                    <Text style={styles.statValue}>{summary.thisWeek}</Text>
                     <Text style={styles.statLabel}>This Week</Text>
                   </View>
                   <View style={styles.statItem}>
-                    <Text style={styles.statValue}>{stats.lastWeek}</Text>
+                    <Text style={styles.statValue}>{summary.lastWeek}</Text>
                     <Text style={styles.statLabel}>Last Week</Text>
                   </View>
                   <View style={styles.statItem}>
-                    <Text style={styles.statValue}>{stats.total}</Text>
+                    <Text style={styles.statValue}>{summary.total}</Text>
                     <Text style={styles.statLabel}>All Time</Text>
                   </View>
                 </View>
-                {selectedHabit.type === 'decrease' && stats.thisWeek < stats.lastWeek && (
+                {selectedHabit.type === 'decrease' && summary.thisWeek < summary.lastWeek && (
                   <Text style={styles.progressText}>
-                    Down {stats.lastWeek - stats.thisWeek} from last week
+                    Down {summary.lastWeek - summary.thisWeek} from last week
                   </Text>
                 )}
-                {selectedHabit.type === 'increase' && stats.thisWeek > stats.lastWeek && (
+                {selectedHabit.type === 'increase' && summary.thisWeek > summary.lastWeek && (
                   <Text style={styles.progressText}>
-                    Up {stats.thisWeek - stats.lastWeek} from last week
+                    Up {summary.thisWeek - summary.lastWeek} from last week
                   </Text>
                 )}
               </View>
@@ -274,22 +455,11 @@ const styles = StyleSheet.create({
   habitChipTextActive: {
     color: '#fff',
   },
-  chartCard: {
-    margin: 16,
-    marginTop: 0,
-    padding: 16,
-    backgroundColor: '#16213e',
-    borderRadius: 12,
-  },
-  chartHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
   timeRangeSelector: {
     flexDirection: 'row',
     gap: 4,
+    marginBottom: 8,
+    justifyContent: 'flex-end',
   },
   timeRangeChip: {
     paddingHorizontal: 10,
@@ -307,10 +477,6 @@ const styles = StyleSheet.create({
   },
   timeRangeTextActive: {
     color: '#fff',
-  },
-  chart: {
-    marginLeft: -16,
-    borderRadius: 8,
   },
   statsCard: {
     margin: 16,

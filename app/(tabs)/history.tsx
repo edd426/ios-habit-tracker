@@ -36,6 +36,7 @@ export default function HistoryScreen() {
   const [timePickerValue, setTimePickerValue] = useState(new Date());
   const [timePickerKey, setTimePickerKey] = useState(0); // Force re-mount picker
   const selectedTimeRef = useRef(new Date()); // Track selection without re-render
+  const baseDateRef = useRef(new Date()); // Store base date for time picker (avoids stale state reads)
   const [editingLog, setEditingLog] = useState<{ type: 'habit' | 'dose'; id: string } | null>(null);
   const [addingForHabit, setAddingForHabit] = useState<string | null>(null);
   const [addingDose, setAddingDose] = useState(false);
@@ -123,6 +124,7 @@ export default function HistoryScreen() {
     setEditingLog({ type, id });
     setTimePickerValue(originalTime);
     selectedTimeRef.current = originalTime;
+    baseDateRef.current = originalTime; // Store base date for time picker
     setTimePickerKey(k => k + 1); // Force fresh picker instance
     setTimeout(() => setShowTimePicker(true), 50);
   };
@@ -130,8 +132,8 @@ export default function HistoryScreen() {
   const handleTimePickerChange = (_e: any, date?: Date) => {
     if (date) {
       // Store in ref to avoid re-render during scroll
-      // Combine selected time with the original date
-      const newDateTime = new Date(timePickerValue);
+      // Combine selected time with the base date (from ref, not state, to avoid stale reads)
+      const newDateTime = new Date(baseDateRef.current);
       newDateTime.setHours(date.getHours(), date.getMinutes(), 0, 0);
       selectedTimeRef.current = newDateTime;
     }
@@ -218,6 +220,7 @@ export default function HistoryScreen() {
     }
     setTimePickerValue(defaultTime);
     selectedTimeRef.current = defaultTime;
+    baseDateRef.current = defaultTime; // Store base date for time picker
     setTimePickerKey(k => k + 1); // Force fresh picker instance
     setTimeout(() => setShowTimePicker(true), 50);
   };
@@ -233,6 +236,7 @@ export default function HistoryScreen() {
     }
     setTimePickerValue(defaultTime);
     selectedTimeRef.current = defaultTime;
+    baseDateRef.current = defaultTime; // Store base date for time picker
     setTimePickerKey(k => k + 1); // Force fresh picker instance
     setTimeout(() => setShowTimePicker(true), 50);
   };

@@ -44,7 +44,12 @@ export default function RootLayout() {
   });
 
   useEffect(() => {
-    if (error) throw error;
+    if (error) {
+      // Log but do NOT throw — a missing/corrupt font asset shouldn't take down the entire app.
+      // The system will fall back to its default font and the rest of the UI renders.
+      console.error('Font load failed:', error);
+      SplashScreen.hideAsync().catch(() => {});
+    }
   }, [error]);
 
   useEffect(() => {
@@ -54,7 +59,8 @@ export default function RootLayout() {
     }
   }, [loaded]);
 
-  if (!loaded) {
+  // Render the app once fonts are loaded OR if font loading errored (system fallback).
+  if (!loaded && !error) {
     return null;
   }
 
