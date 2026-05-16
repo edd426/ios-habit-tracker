@@ -16,6 +16,7 @@ import {
 import { useFocusEffect } from 'expo-router';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import * as Clipboard from 'expo-clipboard';
+import Constants from 'expo-constants';
 
 import { getHabits, addHabit, updateHabit, deleteHabit, buildExportPayload } from '@/lib/storage';
 import { Habit } from '@/lib/types';
@@ -181,6 +182,19 @@ export default function SettingsScreen() {
               </View>
             ))
           )}
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>About</Text>
+          <View style={styles.aboutRow}>
+            <Text style={styles.aboutLabel}>Build</Text>
+            <Text style={styles.aboutValue}>
+              v{Constants.expoConfig?.version ?? '?'}{' '}
+              <Text style={Constants.debugMode ? styles.debugBadge : styles.releaseBadge}>
+                {Constants.debugMode ? '(Debug)' : '(Release)'}
+              </Text>
+            </Text>
+          </View>
         </View>
       </ScrollView>
 
@@ -488,5 +502,29 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#888',
     marginTop: 4,
+  },
+  aboutRow: {
+    backgroundColor: '#16213e',
+    borderRadius: 12,
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  aboutLabel: {
+    fontSize: 14,
+    color: '#888',
+  },
+  aboutValue: {
+    fontSize: 14,
+    color: '#fff',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  debugBadge: {
+    color: '#e74c3c',
+    fontWeight: '700',
+  },
+  releaseBadge: {
+    color: '#2ecc71',
   },
 });
