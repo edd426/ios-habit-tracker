@@ -8,6 +8,7 @@ import {
 } from './icloud';
 import { withTimeout } from './with-timeout';
 import { KEYS, ICLOUD_KEYS } from './keys';
+import { safeParse } from './safe-json';
 
 // Hard ceiling on a single sync attempt. Anything longer is treated as a
 // failure rather than allowed to keep the JS thread busy. 10s is generous —
@@ -70,25 +71,11 @@ function mergeData<T extends BaseEntity>(
 }
 
 /**
- * Filter out deleted items for display purposes.
- * Keeps deleted items in storage for sync consistency.
- */
-function filterDeleted<T extends { deleted?: boolean }>(items: T[]): T[] {
-  return items.filter((item) => !item.deleted);
-}
-
-/**
  * Get data from iCloud, parsing JSON safely.
  */
 async function getICloudData<T>(key: string): Promise<T[]> {
   const data = await getICloudItem(key);
-  if (!data) return [];
-  try {
-    return JSON.parse(data);
-  } catch {
-    console.warn(`Failed to parse iCloud data for key "${key}"`);
-    return [];
-  }
+  return safeParse<T[]>(data, []);
 }
 
 /**
@@ -96,13 +83,7 @@ async function getICloudData<T>(key: string): Promise<T[]> {
  */
 async function getLocalData<T>(key: string): Promise<T[]> {
   const data = await AsyncStorage.getItem(key);
-  if (!data) return [];
-  try {
-    return JSON.parse(data);
-  } catch {
-    console.warn(`Failed to parse local data for key "${key}"`);
-    return [];
-  }
+  return safeParse<T[]>(data, []);
 }
 
 /**
@@ -183,79 +164,27 @@ export async function syncAllData(userId: string): Promise<void> {
 }
 
 /**
- * Push local habits to iCloud after a local change.
+ * Push the entire local collection at `localKey` to iCloud at `icloudKey`.
+ * Called after any local mutation (create/update/delete) to keep iCloud in sync.
+ *
+ * Must read the raw blob — NOT a filtered view — because tombstones
+ * (`deleted: true` records) must propagate via this push so other devices
+ * can apply the delete during their next merge. The GC sweep is the only
+ * thing that should remove tombstones, and only after the grace period.
+ *
+ * No-ops cleanly if iCloud is unavailable; failures are caught by the
+ * caller (`backgroundSync` in storage.ts swallows the rejection).
  */
-async function pushHabitsToICloud(): Promise<void> {
+export async function pushCollectionToICloud(
+  localKey: string,
+  icloudKey: string
+): Promise<void> {
   if (!isICloudAvailable()) return;
 
-  const localData = await getLocalData<Habit>(KEYS.HABITS);
-  await setICloudItem(ICLOUD_KEYS.HABITS, JSON.stringify(localData));
-}
-
-/**
- * Push local habit logs to iCloud after a local change.
- */
-async function pushHabitLogsToICloud(): Promise<void> {
-  if (!isICloudAvailable()) return;
-
-  const localData = await getLocalData<HabitLog>(KEYS.HABIT_LOGS);
-  await setICloudItem(ICLOUD_KEYS.HABIT_LOGS, JSON.stringify(localData));
-}
-
-/**
- * Push local dose logs to iCloud after a local change.
- */
-async function pushDoseLogsToICloud(): Promise<void> {
-  if (!isICloudAvailable()) return;
-
-  const localData = await getLocalData<DoseLog>(KEYS.DOSE_LOGS);
-  await setICloudItem(ICLOUD_KEYS.DOSE_LOGS, JSON.stringify(localData));
-}
-
-/**
- * Sync a single habit to iCloud.
- * Called after local habit create/update.
- */
-export async function syncHabit(userId: string, habit: Habit): Promise<void> {
-  await pushHabitsToICloud();
-}
-
-/**
- * Sync a single habit log to iCloud.
- * Called after local habit log create/update.
- */
-export async function syncHabitLog(userId: string, log: HabitLog): Promise<void> {
-  await pushHabitLogsToICloud();
-}
-
-/**
- * Sync a single dose log to iCloud.
- * Called after local dose log create/update.
- */
-export async function syncDoseLog(userId: string, log: DoseLog): Promise<void> {
-  await pushDoseLogsToICloud();
-}
-
-/**
- * Sync habit deletion to iCloud.
- * The local storage already has the habit marked as deleted or removed.
- */
-export async function syncDeleteHabit(userId: string, habitId: string): Promise<void> {
-  await pushHabitsToICloud();
-}
-
-/**
- * Sync habit log deletion to iCloud.
- */
-export async function syncDeleteHabitLog(userId: string, logId: string): Promise<void> {
-  await pushHabitLogsToICloud();
-}
-
-/**
- * Sync dose log deletion to iCloud.
- */
-export async function syncDeleteDoseLog(userId: string, logId: string): Promise<void> {
-  await pushDoseLogsToICloud();
+  const raw = await AsyncStorage.getItem(localKey);
+  // Send `'[]'` rather than `null` so an explicit empty list overwrites
+  // any stale iCloud state (e.g., after a full local wipe).
+  await setICloudItem(icloudKey, raw ?? '[]');
 }
 
 /**
