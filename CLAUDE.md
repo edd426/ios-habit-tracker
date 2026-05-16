@@ -75,24 +75,85 @@ lib/
 └── auth.ts              # Local UUID generation and management
 ```
 
+## Build and Install — CRITICAL
+
+**This app is the user's daily medication-tracking tool. It must run standalone on the iPhone with no laptop dependency. ALWAYS install Release builds.**
+
+### The rule
+
+```bash
+# ✅ CORRECT — produces a self-contained app that runs without Metro
+npx expo run:ios --device <UDID> --configuration Release
+
+# ❌ WRONG — produces a debug build that requires Metro running on the dev Mac
+npx expo run:ios --device <UDID>
+```
+
+A debug build embeds `http://localhost:8081` as its JS script URL. When Metro isn't running (laptop closed, network changed, terminal closed, Metro killed), the app fails to load JavaScript with:
+
+```
+No script URL provided. Make sure the packager is running or you have embedded
+a JS bundle in your application bundle.
+unsanitizedScriptURLString = (null)
+```
+
+This is then followed by a misleading native crash:
+
+```
+TurboModuleManager: Timed out waiting for modules to be invalidated
+-[RCTTurboModuleManager _invalidateModules]
+```
+
+**The TurboModule timeout is a downstream symptom, not the root cause.** When you see it, look *up* in the device log for the "No script URL provided" line — that's the real cause and it means the user is running a debug build.
+
+### Finding the device UDID
+
+`expo run:ios --device` without a value is interactive and won't work when invoked non-interactively (e.g., from Claude Code). Always pass the UDID explicitly:
+
+```bash
+xcrun xctrace list devices    # find "Evan DeLord's iPhone (...)" → UDID is in parens
+npx expo run:ios --device 00008110-001E1D8114F3801E --configuration Release
+```
+
+### Reading the build output
+
+A successful Release install ends with:
+
+```
+› Build Succeeded
+› Installing /Users/.../HabitTracker.app
+✔ Complete 100%
+```
+
+If the build ends with `CommandError: Cannot launch HabitTracker on ... device is locked`, **this is not a failure** — the build, sign, and install all succeeded. The user just needs to unlock the phone and tap the app icon. Expo reports the locked-launch as a non-zero exit code, which is misleading.
+
+### Disk space prerequisite
+
+A Release build needs **~8 GB of free disk** on the dev Mac for DerivedData + intermediate artifacts. If the user is on a small SSD, check `df -h ~` before kicking off — sub-8 GB often produces a cryptic `No space left on device` error mid-compile. Quick wins: `rm -rf ~/Library/Developer/Xcode/DerivedData` (regenerates), `rm -rf ~/.npm/_cacache`.
+
 ## Development Commands
 
 ```bash
-# Start Expo dev server
+# Start Expo dev server (Metro) — only needed for active JS hot-reload development
 npm start
 
-# Build and run on iOS device (requires Xcode + Apple Developer account)
+# Build and install Release app on iPhone (the daily-use deployment path)
+npx expo run:ios --device <UDID> --configuration Release
+
+# Generate native iOS project (only needed after editing app.json / native config)
 npx expo prebuild --platform ios
-npx expo run:ios --device
 
 # TypeScript check
 npx tsc --noEmit
 
+# Run tests
+npm test
+
 # Clean rebuild (use after major dependency changes)
-rm -rf ios/Pods ios/build node_modules
+rm -rf ios/Pods ios/build node_modules ~/Library/Developer/Xcode/DerivedData
 npm install
 cd ios && pod install && cd ..
-npx expo run:ios --device
+npx expo run:ios --device <UDID> --configuration Release
 ```
 
 ## Type Definitions
