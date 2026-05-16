@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Habit, HabitLog, DoseLog } from './types';
+import { BaseEntity, Habit, HabitLog, DoseLog } from './types';
 import {
   initializeICloud,
   isICloudAvailable,
@@ -7,6 +7,7 @@ import {
   setICloudItem,
 } from './icloud';
 import { withTimeout } from './with-timeout';
+import { KEYS, ICLOUD_KEYS } from './keys';
 
 // Hard ceiling on a single sync attempt. Anything longer is treated as a
 // failure rather than allowed to keep the JS thread busy. 10s is generous —
@@ -16,21 +17,6 @@ import { withTimeout } from './with-timeout';
 const SYNC_TIMEOUT_MS = 10_000;
 
 export type SyncStatus = 'idle' | 'syncing' | 'synced' | 'error' | 'unavailable';
-
-const KEYS = {
-  HABITS: 'habits',
-  HABIT_LOGS: 'habit_logs',
-  DOSE_LOGS: 'dose_logs',
-  LAST_SYNC: 'last_sync_timestamp',
-};
-
-// iCloud key names
-const ICLOUD_KEYS = {
-  HABITS: 'habits',
-  HABIT_LOGS: 'habit_logs',
-  DOSE_LOGS: 'dose_logs',
-  LAST_SYNC: 'last_sync',
-};
 
 /**
  * Initialize iCloud sync. Call this on app startup.
@@ -51,7 +37,7 @@ export function isICloudSyncAvailable(): boolean {
  * Merge local and remote data using last-write-wins strategy.
  * Returns merged data that should be written to both stores.
  */
-function mergeData<T extends { id: string; updatedAt?: number; createdAt?: number; deleted?: boolean }>(
+function mergeData<T extends BaseEntity>(
   local: T[],
   remote: T[]
 ): T[] {
@@ -123,7 +109,7 @@ async function getLocalData<T>(key: string): Promise<T[]> {
  * Sync a specific data type between local and iCloud.
  * Returns the merged data.
  */
-async function syncDataType<T extends { id: string; updatedAt?: number; createdAt?: number; deleted?: boolean }>(
+async function syncDataType<T extends BaseEntity>(
   localKey: string,
   icloudKey: string
 ): Promise<T[]> {
