@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState, useCallback, use
 import { AppState, AppStateStatus } from 'react-native';
 import { initializeUser, getCurrentUserId } from '@/lib/auth';
 import { syncAllData, setupICloudSync, isICloudSyncAvailable, SyncStatus } from '@/lib/sync';
+import { runStartupGc } from '@/lib/storage';
 
 interface AuthContextType {
   userId: string | null;
@@ -61,6 +62,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               if (!cancelled) {
                 setSyncStatus('synced');
                 lastForegroundSyncRef.current = Date.now();
+              }
+
+              // Sweep old soft-deleted records AFTER the pull completes,
+              // so we never hard-delete a tombstone iCloud was about to
+              // send us. Fully invisible to the user — does not touch
+              // syncStatus and runs in its own try/catch.
+              if (!cancelled) {
+                runStartupGc().catch((e) =>
+                  console.warn('Startup GC failed (non-fatal):', e)
+                );
               }
             } catch (error) {
               console.error('Initial sync failed:', error);
