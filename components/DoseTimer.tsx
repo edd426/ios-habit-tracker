@@ -50,23 +50,41 @@ export default function DoseTimer({ onDoseLogged }: Props) {
   }, [lastDose]);
 
   const saveDose = async (timestamp: number) => {
-    await logDose(timestamp);
-    await loadLastDose();
-    onDoseLogged?.();
+    // Dose logging MUST succeed even if notification scheduling fails —
+    // recording the dose is the primary purpose of the app; the reminder
+    // is a nice-to-have. Wrap each part in its own try/catch so a failure
+    // in one doesn't block the other.
+    try {
+      await logDose(timestamp);
+      await loadLastDose();
+      onDoseLogged?.();
+    } catch (e) {
+      console.error('Failed to log dose:', e);
+      Alert.alert(
+        'Could not save dose',
+        'Something went wrong saving the dose. Please try again.'
+      );
+      return;
+    }
 
     // Only schedule notification if logging for now (within last 5 minutes)
     const isRecent = Date.now() - timestamp < 5 * 60 * 1000;
     if (isRecent) {
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: 'Medication Active',
-          body: '2 hours have passed since your dose.',
-        },
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-          seconds: 2 * 60 * 60,
-        },
-      });
+      try {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: 'Medication Active',
+            body: '2 hours have passed since your dose.',
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+            seconds: 2 * 60 * 60,
+          },
+        });
+      } catch (e) {
+        // Permissions denied, system in a bad state, etc. Don't crash the dose flow.
+        console.warn('Failed to schedule dose reminder notification:', e);
+      }
     }
   };
 

@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { withTimeout } from './with-timeout';
 
 // Type for the iCloud storage module
 interface ICloudStorageModule {
@@ -9,10 +10,17 @@ interface ICloudStorageModule {
 }
 
 let iCloudStorage: ICloudStorageModule | null = null;
+// Cache the init promise so concurrent callers share one attempt.
+// Without this, AppState changes during startup can fire multiple init()s
+// in parallel and pile up native-module load work on the JS thread.
+let initPromise: Promise<boolean> | null = null;
 
 /**
  * Initialize iCloud storage. Must be called before using other iCloud functions.
  * Returns true if iCloud is available and initialized successfully.
+ *
+ * Safe to call multiple times — the first call's promise is reused.
+ * Bounded by a 3s timeout so a stuck native-module load can't hang the app.
  */
 export async function initializeICloud(): Promise<boolean> {
   if (Platform.OS !== 'ios') {
@@ -20,15 +28,28 @@ export async function initializeICloud(): Promise<boolean> {
     return false;
   }
 
-  try {
-    const module = await import('expo-icloud-storage');
-    iCloudStorage = module.default;
-    console.log('iCloud storage initialized successfully');
-    return true;
-  } catch (error) {
-    console.warn('Failed to initialize iCloud storage:', error);
-    return false;
-  }
+  if (iCloudStorage) return true;
+  if (initPromise) return initPromise;
+
+  initPromise = (async () => {
+    try {
+      const module = await withTimeout(
+        import('expo-icloud-storage'),
+        3000,
+        'iCloud module load'
+      );
+      iCloudStorage = module.default;
+      console.log('iCloud storage initialized successfully');
+      return true;
+    } catch (error) {
+      console.warn('Failed to initialize iCloud storage:', error);
+      // Reset so a future call can retry (e.g., after a foreground transition)
+      initPromise = null;
+      return false;
+    }
+  })();
+
+  return initPromise;
 }
 
 /**
