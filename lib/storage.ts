@@ -10,12 +10,7 @@ import {
 } from './sync';
 import { getCurrentUserId } from './auth';
 import { safeParse } from './safe-json';
-
-const KEYS = {
-  HABITS: 'habits',
-  HABIT_LOGS: 'habit_logs',
-  DOSE_LOGS: 'dose_logs',
-};
+import { KEYS } from './keys';
 
 // Generate unique ID
 export function generateId(): string {
