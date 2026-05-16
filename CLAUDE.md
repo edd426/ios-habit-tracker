@@ -144,3 +144,28 @@ interface DoseLog {
 4. **Tab Navigation**: Uses Expo Router's group-based routing with `(tabs)` directory
 
 5. **iCloud Sync**: Uses `expo-icloud-storage` for NSUbiquitousKeyValueStore. Syncs on app startup and foreground. Shows "Local only" when iCloud unavailable
+
+## Startup Reliability Invariants
+
+The app must launch reliably — it's the user's source of truth for medication doses. Several invariants protect against the New Architecture's "TurboModuleManager: Timed out waiting for modules to be invalidated" crash, which fires when iOS can't get a response from the JS thread within ~10s during teardown:
+
+1. **UI rendering is never gated on sync.** `AuthContext` calls `setIsLoading(false)` immediately after the local user ID loads. iCloud setup and the initial sync run in a fire-and-forget background block. If iCloud is slow or stuck, the user still gets a working app.
+
+2. **Every native bridge call has a timeout.** Use `lib/with-timeout.ts` to wrap any promise that touches the native side (iCloud, dynamic imports, notifications). The current timeouts:
+   - iCloud module dynamic import: **3s**
+   - Full sync (`syncAllData`): **10s**
+   - Font loading watchdog (`_layout.tsx`): **4s**
+
+3. **Sync is mutex'd and throttled.** `syncAllData` coalesces concurrent callers into one in-flight promise. Foreground-triggered syncs are throttled to one per 10s (`FOREGROUND_SYNC_THROTTLE_MS` in `AuthContext`). Rapid background/foreground cycles can no longer pile up native bridge work on the JS thread.
+
+4. **iCloud init is deduplicated.** The first caller to `initializeICloud()` owns the `import('expo-icloud-storage')` promise; later callers share it. Failure resets the cached promise so a future call (e.g., after a foreground transition) can retry.
+
+5. **Notification scheduling is non-fatal.** `Notifications.scheduleNotificationAsync` is wrapped in try/catch wherever it's called. A permissions denial or system glitch must never block dose logging — recording the dose is the primary purpose of the app.
+
+6. **Soft-fail font loading.** If `useFonts()` errors OR doesn't settle within 4s, the app renders with the system font instead of hanging on a blank screen.
+
+When adding new native-bridge work or new startup logic, preserve these invariants. The pattern: **wrap with `withTimeout`, run off the UI-loading critical path, catch errors and continue.**
+
+## Planned Features
+
+- **"Attempted but unsuccessful" state for habits** - For tracking things like intimacy where an attempt was made but didn't succeed. Useful for understanding patterns around medication timing and side effects.

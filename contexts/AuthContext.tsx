@@ -13,68 +13,113 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Minimum gap between foreground-triggered syncs. Rapid background/foreground
+// cycles otherwise stack up native bridge work on the JS thread and risk the
+// "TurboModuleManager: Timed out waiting for modules to be invalidated" crash.
+const FOREGROUND_SYNC_THROTTLE_MS = 10_000;
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [userId, setUserId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
   const appState = useRef(AppState.currentState);
+  const lastForegroundSyncRef = useRef<number>(0);
+  const syncBusyRef = useRef(false);
 
-  // Initialize local identity and iCloud on mount
+  // Initialize local identity on mount. This is FAST (single AsyncStorage read)
+  // so we await it. iCloud setup and the initial sync are then kicked off in
+  // the background — they MUST NOT block setIsLoading(false), or a slow iCloud
+  // hangs the splash screen and the user thinks the app is broken.
   useEffect(() => {
+    let cancelled = false;
+
     const init = async () => {
       try {
-        // Initialize local user identity
         const id = await initializeUser();
+        if (cancelled) return;
         setUserId(id);
 
-        // Initialize iCloud sync
-        const icloudAvailable = await setupICloudSync();
+        // Release the UI immediately. Everything below runs in the background.
+        setIsLoading(false);
 
-        if (!icloudAvailable) {
-          // iCloud not available - set status and continue
-          setSyncStatus('unavailable');
-          setIsLoading(false);
-          return;
-        }
+        // Fire-and-forget iCloud setup + initial sync.
+        (async () => {
+          try {
+            const icloudAvailable = await setupICloudSync();
+            if (cancelled) return;
 
-        // Trigger initial sync
-        setSyncStatus('syncing');
-        try {
-          await syncAllData(id);
-          setSyncStatus('synced');
-        } catch (error) {
-          console.error('Initial sync failed:', error);
-          setSyncStatus('error');
-        }
+            if (!icloudAvailable) {
+              setSyncStatus('unavailable');
+              return;
+            }
+
+            if (syncBusyRef.current) return;
+            syncBusyRef.current = true;
+            setSyncStatus('syncing');
+            try {
+              await syncAllData(id);
+              if (!cancelled) {
+                setSyncStatus('synced');
+                lastForegroundSyncRef.current = Date.now();
+              }
+            } catch (error) {
+              console.error('Initial sync failed:', error);
+              if (!cancelled) setSyncStatus('error');
+            } finally {
+              syncBusyRef.current = false;
+            }
+          } catch (error) {
+            console.error('iCloud setup failed:', error);
+            if (!cancelled) setSyncStatus('error');
+          }
+        })();
       } catch (error) {
         console.error('Failed to initialize user:', error);
-        setSyncStatus('error');
-      } finally {
-        setIsLoading(false);
+        if (!cancelled) {
+          setSyncStatus('error');
+          setIsLoading(false);
+        }
       }
     };
 
     init();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // Sync when app comes to foreground
+  // Sync when app comes to foreground. Guards:
+  //   1. Reentrancy guard (syncBusyRef) — one sync at a time.
+  //   2. Throttle — at most one sync per FOREGROUND_SYNC_THROTTLE_MS.
+  // Without these, fast app-switching could pile up syncs and exhaust the
+  // JS thread, triggering iOS's TurboModule invalidation watchdog.
   useEffect(() => {
     const handleAppStateChange = async (nextAppState: AppStateStatus) => {
-      // App is coming to foreground
-      if (appState.current.match(/inactive|background/) && nextAppState === 'active') {
-        const currentUserId = getCurrentUserId();
-        if (currentUserId && isICloudSyncAvailable()) {
-          setSyncStatus('syncing');
-          try {
-            await syncAllData(currentUserId);
-            setSyncStatus('synced');
-          } catch (error) {
-            console.error('Foreground sync failed:', error);
-            setSyncStatus('error');
-          }
-        }
-      }
+      const previous = appState.current;
       appState.current = nextAppState;
+
+      const cameToForeground =
+        previous.match(/inactive|background/) && nextAppState === 'active';
+      if (!cameToForeground) return;
+
+      const currentUserId = getCurrentUserId();
+      if (!currentUserId || !isICloudSyncAvailable()) return;
+      if (syncBusyRef.current) return;
+      if (Date.now() - lastForegroundSyncRef.current < FOREGROUND_SYNC_THROTTLE_MS) return;
+
+      syncBusyRef.current = true;
+      lastForegroundSyncRef.current = Date.now();
+      setSyncStatus('syncing');
+      try {
+        await syncAllData(currentUserId);
+        setSyncStatus('synced');
+      } catch (error) {
+        console.error('Foreground sync failed:', error);
+        setSyncStatus('error');
+      } finally {
+        syncBusyRef.current = false;
+      }
     };
 
     const subscription = AppState.addEventListener('change', handleAppStateChange);
@@ -93,13 +138,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    if (syncBusyRef.current) return;
+    syncBusyRef.current = true;
     setSyncStatus('syncing');
     try {
       await syncAllData(currentUserId);
       setSyncStatus('synced');
+      lastForegroundSyncRef.current = Date.now();
     } catch (error) {
       console.error('Manual sync failed:', error);
       setSyncStatus('error');
+    } finally {
+      syncBusyRef.current = false;
     }
   }, []);
 
