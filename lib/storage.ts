@@ -4,7 +4,10 @@ import { pushCollectionToICloud } from './sync';
 import { getCurrentUserId } from './auth';
 import { safeParse } from './safe-json';
 import { withTimeout } from './with-timeout';
+import { serializeWrite } from './write-queue';
 import { KEYS, ICLOUD_KEYS } from './keys';
+import { getDayStart, getDayEnd } from './date-utils';
+import { DoseKind, DEFAULT_DOSE_KIND } from './dose-protocols';
 
 // Generate unique ID
 export function generateId(): string {
@@ -31,20 +34,26 @@ function backgroundSync<T>(syncFn: () => Promise<T>): void {
  * are preserved and propagated to iCloud — they're only removed by the
  * dedicated `gcCollection` sweep after a grace period.
  *
+ * Mutations to the same key are serialized via `serializeWrite`; concurrent
+ * callers (including sync's merge-write in sync.ts) run one after another
+ * instead of clobbering each other's writes.
+ *
  * Returns the post-mutation items so callers that need to know "what's in
  * there now" don't need a second read.
  */
-async function mutateCollection<T extends BaseEntity>(
+function mutateCollection<T extends BaseEntity>(
   localKey: string,
   icloudKey: string,
   mutate: (items: T[]) => T[]
 ): Promise<T[]> {
-  const raw = await AsyncStorage.getItem(localKey);
-  const items = safeParse<T[]>(raw, []);
-  const next = mutate(items);
-  await AsyncStorage.setItem(localKey, JSON.stringify(next));
-  backgroundSync(() => pushCollectionToICloud(localKey, icloudKey));
-  return next;
+  return serializeWrite(localKey, async () => {
+    const raw = await AsyncStorage.getItem(localKey);
+    const items = safeParse<T[]>(raw, []);
+    const next = mutate(items);
+    await AsyncStorage.setItem(localKey, JSON.stringify(next));
+    backgroundSync(() => pushCollectionToICloud(localKey, icloudKey));
+    return next;
+  });
 }
 
 // Habits
@@ -78,13 +87,17 @@ export async function updateHabit(
 }
 
 export async function deleteHabit(id: string): Promise<void> {
-  // Cascade: remove the habit and all its logs. Two collections → two
-  // mutateCollection calls, each handles its own iCloud push.
+  // Cascade: tombstone the habit and all its logs. Two collections → two
+  // mutateCollection calls, each handles its own iCloud push. Soft deletes
+  // (see deleteDoseLog) so the deletion propagates through the iCloud merge
+  // instead of being resurrected by another device's copy or a stale remote
+  // blob; the GC sweep hard-deletes tombstones after the grace period.
+  const now = Date.now();
   await mutateCollection<Habit>(KEYS.HABITS, ICLOUD_KEYS.HABITS, (items) =>
-    items.filter((h) => h.id !== id)
+    items.map((h) => (h.id === id ? { ...h, deleted: true, updatedAt: now } : h))
   );
   await mutateCollection<HabitLog>(KEYS.HABIT_LOGS, ICLOUD_KEYS.HABIT_LOGS, (items) =>
-    items.filter((l) => l.habitId !== id)
+    items.map((l) => (l.habitId === id ? { ...l, deleted: true, updatedAt: now } : l))
   );
 }
 
@@ -97,19 +110,33 @@ export async function getHabitLogs(): Promise<HabitLog[]> {
 }
 
 export async function logHabit(habitId: string, timestamp?: number): Promise<HabitLog> {
+  const logs = await logHabitBatch(habitId, timestamp ?? Date.now(), 1);
+  return logs[0];
+}
+
+/**
+ * Append `count` logs for a habit at the same timestamp in ONE collection
+ * write (and one iCloud push). This is how the quantity modal ("+3 at 9pm")
+ * persists multiple entries — N separate logHabit calls would be N writes.
+ */
+export async function logHabitBatch(
+  habitId: string,
+  timestamp: number,
+  count: number
+): Promise<HabitLog[]> {
   const now = Date.now();
-  const newLog: HabitLog = {
+  const newLogs: HabitLog[] = Array.from({ length: count }, () => ({
     id: generateId(),
     habitId,
-    timestamp: timestamp ?? now,
+    timestamp,
     createdAt: now,
     updatedAt: now,
-  };
+  }));
   await mutateCollection<HabitLog>(KEYS.HABIT_LOGS, ICLOUD_KEYS.HABIT_LOGS, (items) => [
     ...items,
-    newLog,
+    ...newLogs,
   ]);
-  return newLog;
+  return newLogs;
 }
 
 export async function getLogsForHabit(habitId: string): Promise<HabitLog[]> {
@@ -118,9 +145,7 @@ export async function getLogsForHabit(habitId: string): Promise<HabitLog[]> {
 }
 
 export async function removeLastTodayLog(habitId: string): Promise<boolean> {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayStart = today.getTime();
+  const todayStart = getDayStart(Date.now());
 
   // Closure captures whether anything was removed, since the mutator's
   // return shape can't carry that signal.
@@ -133,7 +158,10 @@ export async function removeLastTodayLog(habitId: string): Promise<boolean> {
     if (todayLogs.length === 0) return items;
     const toRemove = todayLogs[0];
     removed = true;
-    return items.filter((l) => l.id !== toRemove.id);
+    // Tombstone rather than remove — see deleteDoseLog.
+    return items.map((l) =>
+      l.id === toRemove.id ? { ...l, deleted: true, updatedAt: Date.now() } : l
+    );
   });
 
   return removed;
@@ -141,17 +169,13 @@ export async function removeLastTodayLog(habitId: string): Promise<boolean> {
 
 export async function getTodayCountForHabit(habitId: string): Promise<number> {
   const logs = await getLogsForHabit(habitId);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayStart = today.getTime();
+  const todayStart = getDayStart(Date.now());
   return logs.filter((l) => l.timestamp >= todayStart).length;
 }
 
 export async function getAllTodayCounts(): Promise<Record<string, number>> {
   const logs = await getHabitLogs();
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayStart = today.getTime();
+  const todayStart = getDayStart(Date.now());
 
   const counts: Record<string, number> = {};
   logs
@@ -170,11 +194,15 @@ export async function getDoseLogs(): Promise<DoseLog[]> {
   return logs.filter((l) => !l.deleted);
 }
 
-export async function logDose(timestamp?: number): Promise<DoseLog> {
+export async function logDose(
+  timestamp?: number,
+  kind: DoseKind = DEFAULT_DOSE_KIND
+): Promise<DoseLog> {
   const now = Date.now();
   const newLog: DoseLog = {
     id: generateId(),
     timestamp: timestamp ?? now,
+    kind,
     createdAt: now,
     updatedAt: now,
   };
@@ -194,15 +222,22 @@ export async function getLastDose(): Promise<DoseLog | null> {
 }
 
 // Date-based queries and log management
-export async function getLogsForDate(date: Date): Promise<HabitLog[]> {
-  const logs = await getHabitLogs();
-  const dayStart = new Date(date);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayEnd = dayStart.getTime() + 24 * 60 * 60 * 1000;
 
+/** Items whose timestamp falls on `date`'s local day, sorted ascending. */
+async function logsForLocalDay<T extends BaseEntity & { timestamp: number }>(
+  getter: () => Promise<T[]>,
+  date: Date
+): Promise<T[]> {
+  const logs = await getter();
+  const dayStart = getDayStart(date);
+  const dayEnd = getDayEnd(date);
   return logs
-    .filter((l) => l.timestamp >= dayStart.getTime() && l.timestamp < dayEnd)
+    .filter((l) => l.timestamp >= dayStart && l.timestamp < dayEnd)
     .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+export function getLogsForDate(date: Date): Promise<HabitLog[]> {
+  return logsForLocalDay(getHabitLogs, date);
 }
 
 export async function updateLog(logId: string, updates: { timestamp?: number }): Promise<void> {
@@ -212,25 +247,19 @@ export async function updateLog(logId: string, updates: { timestamp?: number }):
 }
 
 export async function deleteLog(logId: string): Promise<void> {
+  // Tombstone rather than remove — see deleteDoseLog.
   await mutateCollection<HabitLog>(KEYS.HABIT_LOGS, ICLOUD_KEYS.HABIT_LOGS, (items) =>
-    items.filter((l) => l.id !== logId)
+    items.map((l) => (l.id === logId ? { ...l, deleted: true, updatedAt: Date.now() } : l))
   );
 }
 
-export async function getDoseLogsForDate(date: Date): Promise<DoseLog[]> {
-  const logs = await getDoseLogs();
-  const dayStart = new Date(date);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayEnd = dayStart.getTime() + 24 * 60 * 60 * 1000;
-
-  return logs
-    .filter((l) => l.timestamp >= dayStart.getTime() && l.timestamp < dayEnd)
-    .sort((a, b) => a.timestamp - b.timestamp);
+export function getDoseLogsForDate(date: Date): Promise<DoseLog[]> {
+  return logsForLocalDay(getDoseLogs, date);
 }
 
 export async function updateDoseLog(
   logId: string,
-  updates: { timestamp?: number }
+  updates: { timestamp?: number; kind?: DoseKind }
 ): Promise<void> {
   await mutateCollection<DoseLog>(KEYS.DOSE_LOGS, ICLOUD_KEYS.DOSE_LOGS, (items) =>
     items.map((l) => (l.id === logId ? { ...l, ...updates, updatedAt: Date.now() } : l))
@@ -238,8 +267,11 @@ export async function updateDoseLog(
 }
 
 export async function deleteDoseLog(logId: string): Promise<void> {
+  // Soft delete (tombstone) — matches habits/logs and keeps iCloud merge safe.
+  // A hard delete would let another device's copy resurrect the dose on the
+  // next sync; the tombstone propagates the deletion until GC sweeps it.
   await mutateCollection<DoseLog>(KEYS.DOSE_LOGS, ICLOUD_KEYS.DOSE_LOGS, (items) =>
-    items.filter((l) => l.id !== logId)
+    items.map((l) => (l.id === logId ? { ...l, deleted: true, updatedAt: Date.now() } : l))
   );
 }
 
@@ -307,12 +339,37 @@ export async function runStartupGc(): Promise<void> {
   );
 }
 
+// Sync payload size monitoring.
+//
+// iCloud KV storage (NSUbiquitousKeyValueStore) caps ALL keys at 1 MB total.
+// Past the cap, set() fails SILENTLY — sync just stops propagating while the
+// UI still reports success. Settings surfaces this gauge so the ceiling is
+// visible long before that happens.
+export const ICLOUD_KV_LIMIT_BYTES = 1024 * 1024;
+
+export async function getSyncDataSize(): Promise<{
+  perKey: Record<string, number>;
+  totalBytes: number;
+}> {
+  const keys = [KEYS.HABITS, KEYS.HABIT_LOGS, KEYS.DOSE_LOGS];
+  const perKey: Record<string, number> = {};
+  let totalBytes = 0;
+  for (const key of keys) {
+    const raw = await AsyncStorage.getItem(key);
+    // String length ≈ bytes for this ASCII-dominated JSON; fine for a gauge.
+    const bytes = raw?.length ?? 0;
+    perKey[key] = bytes;
+    totalBytes += bytes;
+  }
+  return { perKey, totalBytes };
+}
+
 // Export
 export interface ExportPayload {
   exportedAt: number;
   exportedAtISO: string;
   userId: string | null;
-  schemaVersion: 1;
+  schemaVersion: 2;
   habits: Habit[];
   habitLogs: HabitLog[];
   doseLogs: DoseLog[];
@@ -336,35 +393,10 @@ export async function buildExportPayload(): Promise<ExportPayload> {
     exportedAt: now,
     exportedAtISO: new Date(now).toISOString(),
     userId: getCurrentUserId(),
-    schemaVersion: 1,
+    schemaVersion: 2,
     habits: safeParse<Habit[]>(habitsRaw, []),
     habitLogs: safeParse<HabitLog[]>(habitLogsRaw, []),
     doseLogs: safeParse<DoseLog[]>(doseLogsRaw, []),
     lastSync: lastSyncRaw ? parseInt(lastSyncRaw, 10) : null,
   };
-}
-
-// Stats helpers
-export async function getDailyCountsForHabit(
-  habitId: string,
-  days: number = 30
-): Promise<{ date: string; count: number }[]> {
-  const logs = await getLogsForHabit(habitId);
-  const result: { date: string; count: number }[] = [];
-
-  for (let i = days - 1; i >= 0; i--) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-    date.setHours(0, 0, 0, 0);
-    const dayStart = date.getTime();
-    const dayEnd = dayStart + 24 * 60 * 60 * 1000;
-
-    const count = logs.filter((l) => l.timestamp >= dayStart && l.timestamp < dayEnd).length;
-    result.push({
-      date: date.toISOString().split('T')[0],
-      count,
-    });
-  }
-
-  return result;
 }

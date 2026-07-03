@@ -206,6 +206,8 @@ interface DoseLog {
 
 5. **iCloud Sync**: Uses `expo-icloud-storage` for NSUbiquitousKeyValueStore. Syncs on app startup and foreground. Shows "Local only" when iCloud unavailable
 
+6. **iCloud KV 1 MB ceiling**: NSUbiquitousKeyValueStore caps ALL keys at 1 MB total, and `set()` past the cap fails SILENTLY — sync stops propagating while the UI still reports success. Settings shows the current sync payload size (`getSyncDataSize()` in `lib/storage.ts`); if it approaches the limit, old logs need to be archived out of the sync set (or the sync layer moved to file-based iCloud storage)
+
 ## Startup Reliability Invariants
 
 The app must launch reliably — it's the user's source of truth for medication doses. Several invariants protect against the New Architecture's "TurboModuleManager: Timed out waiting for modules to be invalidated" crash, which fires when iOS can't get a response from the JS thread within ~10s during teardown:

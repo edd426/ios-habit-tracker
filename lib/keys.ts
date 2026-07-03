@@ -12,6 +12,9 @@ export const KEYS = {
   HABIT_LOGS: 'habit_logs',
   DOSE_LOGS: 'dose_logs',
   LAST_SYNC: 'last_sync_timestamp',
+  // Local-only: tracks which one-time data migrations have run on THIS device.
+  // Intentionally NOT in ICLOUD_KEYS — migration state is per-device.
+  SCHEMA_VERSION: 'schema_version',
 } as const;
 
 export const ICLOUD_KEYS = {

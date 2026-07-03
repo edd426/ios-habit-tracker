@@ -1,7 +1,7 @@
 /**
  * Stats aggregations — pure functions over pre-loaded data.
  *
- * Replaces the O(days × logs) pattern in storage.getDailyCountsForHabit by:
+ * Replaces the old O(days × logs) per-chart storage scans by:
  *   1. Reading all three storage blobs ONCE per stats screen load (`loadAllForStats`)
  *   2. Building per-habit and per-date indexes
  *   3. All chart-specific bucketers operate on the indexes (no further storage reads)
@@ -13,12 +13,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Habit, HabitLog, DoseLog } from './types';
 import { safeParse } from './safe-json';
-
-const KEYS = {
-  HABITS: 'habits',
-  HABIT_LOGS: 'habit_logs',
-  DOSE_LOGS: 'dose_logs',
-};
+import { KEYS } from './keys';
+import { protocolFor } from './dose-protocols';
 
 // ============================================================================
 // Types
@@ -35,11 +31,10 @@ export interface StatsLoad {
 }
 
 export interface MedicatedBuckets {
-  lt2h: number;       // event within 2h after a dose (absorption window)
-  in_2_12h: number;   // typical effective window for opioid antagonist protocols
-  in_12_24h: number;  // residual / waning
-  gt24h: number;      // outside the typical effective window
-  none: number;       // no prior dose at all
+  none: number;       // no dose before the event
+  beforeLead: number; // dosed, but protection not yet active (gap < leadHours)
+  inWindow: number;   // protected: leadHours <= gap <= windowHours
+  lapsed: number;     // protection worn off (gap > windowHours)
   total: number;
 }
 
@@ -167,7 +162,7 @@ export function enumerateDates(startMs: number, endMs: number): string[] {
 }
 
 // ============================================================================
-// Daily counts (replacement for storage.getDailyCountsForHabit but indexed)
+// Daily counts (indexed)
 // ============================================================================
 
 export function dailyCountsForHabit(
@@ -241,43 +236,48 @@ export function dayOfWeekBuckets(logs: HabitLog[]): number[] {
 
 const HOUR_MS = 60 * 60 * 1000;
 
-/** Binary search: returns the latest dose ts <= eventTs, or null. */
-function lastDoseBefore(eventTs: number, sortedDoseTimestamps: number[]): number | null {
+/** Binary search: index of the latest dose with timestamp <= eventTs, or -1. */
+function lastDoseIndexAtOrBefore(eventTs: number, sortedDoses: DoseLog[]): number {
   let lo = 0;
-  let hi = sortedDoseTimestamps.length;
+  let hi = sortedDoses.length;
   while (lo < hi) {
     const mid = (lo + hi) >>> 1;
-    if (sortedDoseTimestamps[mid] <= eventTs) lo = mid + 1;
+    if (sortedDoses[mid].timestamp <= eventTs) lo = mid + 1;
     else hi = mid;
   }
-  if (lo === 0) return null;
-  return sortedDoseTimestamps[lo - 1];
+  return lo - 1;
 }
 
+/**
+ * Classify each event against the protective window of its MOST RECENT prior
+ * dose. The window is per-protocol (each dose's own lead/stop hours), so mixed
+ * 1-hour/2-hour doses are judged correctly. Un-kinded legacy doses fall back to
+ * the legacy protocol via `protocolFor`.
+ */
 export function medicatedWindowBuckets(
   logs: HabitLog[],
   doses: DoseLog[]
 ): MedicatedBuckets {
-  const sortedDoses = doses.map((d) => d.timestamp).sort((a, b) => a - b);
+  const sortedDoses = [...doses].sort((a, b) => a.timestamp - b.timestamp);
   const out: MedicatedBuckets = {
-    lt2h: 0,
-    in_2_12h: 0,
-    in_12_24h: 0,
-    gt24h: 0,
     none: 0,
+    beforeLead: 0,
+    inWindow: 0,
+    lapsed: 0,
     total: logs.length,
   };
   for (const log of logs) {
-    const lastDose = lastDoseBefore(log.timestamp, sortedDoses);
-    if (lastDose === null) {
+    const idx = lastDoseIndexAtOrBefore(log.timestamp, sortedDoses);
+    if (idx < 0) {
       out.none++;
       continue;
     }
-    const gapHr = (log.timestamp - lastDose) / HOUR_MS;
-    if (gapHr < 2) out.lt2h++;
-    else if (gapHr <= 12) out.in_2_12h++;
-    else if (gapHr <= 24) out.in_12_24h++;
-    else out.gt24h++;
+    const dose = sortedDoses[idx];
+    const p = protocolFor(dose);
+    const gapHr = (log.timestamp - dose.timestamp) / HOUR_MS;
+    if (gapHr < p.leadHours) out.beforeLead++;
+    else if (gapHr <= p.windowHours) out.inWindow++;
+    else out.lapsed++;
   }
   return out;
 }

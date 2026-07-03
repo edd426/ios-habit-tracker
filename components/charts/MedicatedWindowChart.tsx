@@ -19,20 +19,19 @@ export default React.memo(function MedicatedWindowChart({ buckets }: Props) {
     );
   }
 
-  // 2-12h is the typical effective window for opioid-antagonist protocols;
-  // <2h is the absorption ramp; >24h is outside the effective window.
+  // Each event vs the protective window of its most recent dose. "Covered"
+  // (green) is the good bucket: after the lead time, before protection wears off.
   const segments = [
-    { label: '<2h', count: buckets.lt2h, color: '#f39c12' },          // amber: absorbing
-    { label: '2-12h', count: buckets.in_2_12h, color: '#2ecc71' },    // green: in window
-    { label: '12-24h', count: buckets.in_12_24h, color: '#f1c40f' },  // yellow: waning
-    { label: '>24h', count: buckets.gt24h, color: '#e74c3c' },        // red: outside window
-    { label: 'no dose', count: buckets.none, color: '#7f8c8d' },      // grey: no prior dose
+    { label: 'before lead', count: buckets.beforeLead, color: '#f39c12' }, // amber: too early
+    { label: 'covered', count: buckets.inWindow, color: '#2ecc71' },       // green: protected
+    { label: 'lapsed', count: buckets.lapsed, color: '#e74c3c' },          // red: worn off
+    { label: 'no dose', count: buckets.none, color: '#7f8c8d' },           // grey: no prior dose
   ].filter((s) => s.count > 0);
 
   return (
     <ChartCard
       title="Medicated window"
-      subtitle="Time since last dose at each event. Green segments are within the typical 2–12h effective window."
+      subtitle="Each event vs its most recent dose's protective window. Green = covered (after the lead time, before it wears off)."
     >
       <View style={styles.barRow}>
         {segments.map((s) => (

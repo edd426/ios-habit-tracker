@@ -3,6 +3,8 @@ import { AppState, AppStateStatus } from 'react-native';
 import { initializeUser, getCurrentUserId } from '@/lib/auth';
 import { syncAllData, setupICloudSync, isICloudSyncAvailable, SyncStatus } from '@/lib/sync';
 import { runStartupGc } from '@/lib/storage';
+import { runMigrations } from '@/lib/migrations';
+import { withTimeout } from '@/lib/with-timeout';
 
 interface AuthContextType {
   userId: string | null;
@@ -46,6 +48,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Fire-and-forget iCloud setup + initial sync.
         (async () => {
           try {
+            // One-time local data migrations (e.g., dose-kind back-fill). Runs
+            // off the UI-loading critical path; bounded + non-fatal so a stuck
+            // or failed migration can never hang or crash startup.
+            await withTimeout(runMigrations(), 5_000, 'migrations').catch((e) =>
+              console.warn('Migrations failed (non-fatal):', e)
+            );
+
             const icloudAvailable = await setupICloudSync();
             if (cancelled) return;
 

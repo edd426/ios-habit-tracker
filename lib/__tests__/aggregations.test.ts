@@ -22,8 +22,8 @@ function hl(habitId: string, ts: number): HabitLog {
   return { id: `${habitId}-${ts}`, habitId, timestamp: ts, createdAt: ts, updatedAt: ts };
 }
 
-function dl(ts: number): DoseLog {
-  return { id: `d-${ts}`, timestamp: ts, createdAt: ts, updatedAt: ts };
+function dl(ts: number, kind?: 'fast' | 'slow'): DoseLog {
+  return { id: `d-${ts}`, timestamp: ts, kind, createdAt: ts, updatedAt: ts };
 }
 
 const HOUR = 60 * 60 * 1000;
@@ -105,49 +105,55 @@ describe('dayOfWeekBuckets', () => {
 });
 
 describe('medicatedWindowBuckets', () => {
-  it('classifies events by gap from last dose', () => {
-    // Dose at noon, events at +1h, +5h, +18h, +30h, and one BEFORE any dose
+  it('classifies events against a legacy (slow: 2h lead / 12h window) dose', () => {
     const dose = new Date(2026, 0, 15, 12, 0, 0).getTime();
     const logs = [
-      hl('a', dose - HOUR),               // before any dose -> "none"
-      hl('a', dose + 1 * HOUR),           // <2h
-      hl('a', dose + 5 * HOUR),           // 2-12h
-      hl('a', dose + 18 * HOUR),          // 12-24h
-      hl('a', dose + 30 * HOUR),          // >24h
+      hl('a', dose - HOUR),       // before any dose -> none
+      hl('a', dose + 1 * HOUR),   // gap 1 < lead 2 -> beforeLead
+      hl('a', dose + 5 * HOUR),   // within 2..12 -> inWindow
+      hl('a', dose + 18 * HOUR),  // > 12 -> lapsed
     ];
-    const doses = [dl(dose)];
-    const b = medicatedWindowBuckets(logs, doses);
+    const b = medicatedWindowBuckets(logs, [dl(dose)]); // dl() defaults to slow
     expect(b.none).toBe(1);
-    expect(b.lt2h).toBe(1);
-    expect(b.in_2_12h).toBe(1);
-    expect(b.in_12_24h).toBe(1);
-    expect(b.gt24h).toBe(1);
-    expect(b.total).toBe(5);
+    expect(b.beforeLead).toBe(1);
+    expect(b.inWindow).toBe(1);
+    expect(b.lapsed).toBe(1);
+    expect(b.total).toBe(4);
   });
 
-  it('handles boundary at exactly 12h (inclusive in 2-12h bucket)', () => {
+  it('uses the fast protocol (1h lead / 8h window) for fast doses', () => {
     const dose = new Date(2026, 0, 15, 12, 0, 0).getTime();
-    const logs = [hl('a', dose + 12 * HOUR)];
-    const b = medicatedWindowBuckets(logs, [dl(dose)]);
-    expect(b.in_2_12h).toBe(1);
-    expect(b.in_12_24h).toBe(0);
+    const logs = [
+      hl('a', dose + 30 * 60 * 1000), // 0.5h < lead 1 -> beforeLead
+      hl('a', dose + 3 * HOUR),       // within 1..8 -> inWindow
+      hl('a', dose + 9 * HOUR),       // > 8 -> lapsed
+    ];
+    const b = medicatedWindowBuckets(logs, [dl(dose, 'fast')]);
+    expect(b.beforeLead).toBe(1);
+    expect(b.inWindow).toBe(1);
+    expect(b.lapsed).toBe(1);
   });
 
-  it('handles boundary at exactly 24h (inclusive in 12-24h bucket)', () => {
+  it('treats lead and window boundaries as inclusive of inWindow', () => {
     const dose = new Date(2026, 0, 15, 12, 0, 0).getTime();
-    const logs = [hl('a', dose + 24 * HOUR)];
-    const b = medicatedWindowBuckets(logs, [dl(dose)]);
-    expect(b.in_12_24h).toBe(1);
-    expect(b.gt24h).toBe(0);
+    // gap == leadHours -> inWindow
+    expect(medicatedWindowBuckets([hl('a', dose + 1 * HOUR)], [dl(dose, 'fast')]).inWindow).toBe(1);
+    // gap == windowHours -> inWindow; just over -> lapsed
+    expect(medicatedWindowBuckets([hl('a', dose + 8 * HOUR)], [dl(dose, 'fast')]).inWindow).toBe(1);
+    expect(
+      medicatedWindowBuckets([hl('a', dose + 8 * HOUR + 60_000)], [dl(dose, 'fast')]).lapsed
+    ).toBe(1);
   });
 
-  it('picks the MOST RECENT dose when multiple exist', () => {
-    const dose1 = new Date(2026, 0, 14, 12, 0, 0).getTime();
-    const dose2 = new Date(2026, 0, 15, 12, 0, 0).getTime();
-    const logs = [hl('a', dose2 + 3 * HOUR)]; // 3h after dose2, ~27h after dose1
-    const b = medicatedWindowBuckets(logs, [dl(dose1), dl(dose2)]);
-    expect(b.in_2_12h).toBe(1);
-    expect(b.gt24h).toBe(0);
+  it('judges each event against its MOST RECENT dose\'s own protocol', () => {
+    const slowDose = new Date(2026, 0, 14, 12, 0, 0).getTime();
+    const fastDose = new Date(2026, 0, 15, 12, 0, 0).getTime();
+    // 10h after the fast dose: lapsed (fast window is 8h) — even though that
+    // gap would still be "inWindow" for a slow dose.
+    const logs = [hl('a', fastDose + 10 * HOUR)];
+    const b = medicatedWindowBuckets(logs, [dl(slowDose, 'slow'), dl(fastDose, 'fast')]);
+    expect(b.lapsed).toBe(1);
+    expect(b.inWindow).toBe(0);
   });
 });
 

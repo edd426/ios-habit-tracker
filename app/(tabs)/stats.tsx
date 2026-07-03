@@ -24,7 +24,8 @@ import {
   toLocalDateKey,
   toLocalDayStart,
 } from '@/lib/aggregations';
-import { Habit, HabitLog } from '@/lib/types';
+import { Habit, HabitLog, DoseLog, DoseKind } from '@/lib/types';
+import { DOSE_PROTOCOLS, LEGACY_DOSE_KIND } from '@/lib/dose-protocols';
 import ChartCard from '@/components/charts/ChartCard';
 import TimeOfDayChart from '@/components/charts/TimeOfDayChart';
 import DayOfWeekChart from '@/components/charts/DayOfWeekChart';
@@ -148,12 +149,17 @@ export default function StatsScreen() {
   }, [load, selectedHabitId]);
 
   const doseSummary = useMemo(() => {
-    if (!load) return { thisWeek: 0, total: 0 };
+    const empty = { thisWeek: 0, total: 0, weekByKind: { fast: 0, slow: 0 } };
+    if (!load) return empty;
     const now = Date.now();
     const weekAgo = now - 7 * DAY_MS;
+    const week = load.doseLogs.filter((l) => l.timestamp >= weekAgo);
+    const countKind = (arr: DoseLog[], k: DoseKind) =>
+      arr.filter((d) => (d.kind ?? LEGACY_DOSE_KIND) === k).length;
     return {
       total: load.doseLogs.length,
-      thisWeek: load.doseLogs.filter((l) => l.timestamp >= weekAgo).length,
+      thisWeek: week.length,
+      weekByKind: { fast: countKind(week, 'fast'), slow: countKind(week, 'slow') },
     };
   }, [load]);
 
@@ -282,6 +288,10 @@ export default function StatsScreen() {
             <Text style={styles.statLabel}>All Time</Text>
           </View>
         </View>
+        <Text style={styles.doseBreakdown}>
+          This week — {DOSE_PROTOCOLS.fast.label}: {doseSummary.weekByKind.fast} ·{' '}
+          {DOSE_PROTOCOLS.slow.label}: {doseSummary.weekByKind.slow}
+        </Text>
       </View>
 
       {load.habits.length === 0 ? (
@@ -507,6 +517,12 @@ const styles = StyleSheet.create({
     color: '#2ecc71',
     marginTop: 12,
     fontSize: 14,
+  },
+  doseBreakdown: {
+    textAlign: 'center',
+    color: '#888',
+    fontSize: 13,
+    marginTop: 12,
   },
   emptyState: {
     alignItems: 'center',

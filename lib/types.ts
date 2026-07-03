@@ -25,6 +25,18 @@ export interface HabitLog extends BaseEntity {
   timestamp: number;
 }
 
+/**
+ * Which dosing protocol a dose follows. Kept abstract (`fast`/`slow`) rather
+ * than naming anything, so the on-screen labels and the timing numbers can
+ * change without a data migration. Timing for each kind lives in
+ * `lib/dose-protocols.ts`.
+ */
+export type DoseKind = 'fast' | 'slow';
+
 export interface DoseLog extends BaseEntity {
   timestamp: number;
+  // Optional for backward compatibility: doses logged before the two-protocol
+  // feature have no `kind`. `protocolFor()` treats `undefined` as the legacy
+  // default, and a one-time migration back-fills the field.
+  kind?: DoseKind;
 }

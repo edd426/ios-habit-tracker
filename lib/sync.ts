@@ -7,6 +7,7 @@ import {
   setICloudItem,
 } from './icloud';
 import { withTimeout } from './with-timeout';
+import { serializeWrite } from './write-queue';
 import { KEYS, ICLOUD_KEYS } from './keys';
 import { safeParse } from './safe-json';
 
@@ -37,8 +38,10 @@ export function isICloudSyncAvailable(): boolean {
 /**
  * Merge local and remote data using last-write-wins strategy.
  * Returns merged data that should be written to both stores.
+ *
+ * Exported for unit testing — it's the heart of conflict resolution.
  */
-function mergeData<T extends BaseEntity>(
+export function mergeData<T extends BaseEntity>(
   local: T[],
   remote: T[]
 ): T[] {
@@ -89,24 +92,33 @@ async function getLocalData<T>(key: string): Promise<T[]> {
 /**
  * Sync a specific data type between local and iCloud.
  * Returns the merged data.
+ *
+ * The whole read→merge→write cycle runs inside the same per-key write queue
+ * as storage.ts mutations. Without this, a log written between the sync's
+ * local read and its merged write-back would be silently erased. The iCloud
+ * set stays inside the queue too — NSUbiquitousKeyValueStore.set is a cheap
+ * synchronous in-memory call, and keeping it serialized preserves write
+ * ordering against the per-mutation background pushes.
  */
-async function syncDataType<T extends BaseEntity>(
+function syncDataType<T extends BaseEntity>(
   localKey: string,
   icloudKey: string
 ): Promise<T[]> {
-  // Read from both stores
-  const localData = await getLocalData<T>(localKey);
-  const remoteData = await getICloudData<T>(icloudKey);
+  return serializeWrite(localKey, async () => {
+    // Read from both stores
+    const localData = await getLocalData<T>(localKey);
+    const remoteData = await getICloudData<T>(icloudKey);
 
-  // Merge using last-write-wins
-  const merged = mergeData(localData, remoteData);
+    // Merge using last-write-wins
+    const merged = mergeData(localData, remoteData);
 
-  // Write merged data to both stores
-  const jsonData = JSON.stringify(merged);
-  await AsyncStorage.setItem(localKey, jsonData);
-  await setICloudItem(icloudKey, jsonData);
+    // Write merged data to both stores
+    const jsonData = JSON.stringify(merged);
+    await AsyncStorage.setItem(localKey, jsonData);
+    await setICloudItem(icloudKey, jsonData);
 
-  return merged;
+    return merged;
+  });
 }
 
 // In-flight sync promise. Concurrent callers share this — back-to-back
