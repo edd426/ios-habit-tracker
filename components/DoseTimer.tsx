@@ -1,61 +1,117 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, Modal } from 'react-native';
-import DateTimePicker from '@react-native-community/datetimepicker';
+import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { getLastDose, logDose } from '@/lib/storage';
 import { DoseLog } from '@/lib/types';
+import {
+  DoseKind,
+  DOSE_PROTOCOLS,
+  DEFAULT_DOSE_KIND,
+  protocolFor,
+  doseWindow,
+} from '@/lib/dose-protocols';
+import { DOSE_RECENT_WINDOW_MS } from '@/lib/constants';
+import PickerSheet from './PickerSheet';
 
 interface Props {
   onDoseLogged?: () => void;
 }
 
+const HOUR_SECONDS = 60 * 60;
+// The non-default kind, for the "log the other one" link.
+const SECONDARY_KIND: DoseKind = DEFAULT_DOSE_KIND === 'fast' ? 'slow' : 'fast';
+
+function formatClock(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
 export default function DoseTimer({ onDoseLogged }: Props) {
   const [lastDose, setLastDose] = useState<DoseLog | null>(null);
   const [elapsed, setElapsed] = useState<string>('No dose logged');
-  const [showDatePicker, setShowDatePicker] = useState(false);
-  const [selectedDate, setSelectedDate] = useState(new Date());
-  const [pickerMode, setPickerMode] = useState<'date' | 'time'>('date');
+  const [status, setStatus] = useState<string | null>(null);
+  const [showPicker, setShowPicker] = useState(false);
+  const [pickerValue, setPickerValue] = useState(new Date());
 
   const loadLastDose = useCallback(async () => {
-    const dose = await getLastDose();
-    setLastDose(dose);
+    setLastDose(await getLastDose());
   }, []);
 
   useEffect(() => {
     loadLastDose();
   }, [loadLastDose]);
 
+  // Live elapsed time + protected-window status, refreshed each minute.
   useEffect(() => {
     if (!lastDose) {
       setElapsed('No dose logged');
+      setStatus(null);
       return;
     }
 
-    const updateElapsed = () => {
+    const protocol = protocolFor(lastDose);
+    const { clearAt, stopBy } = doseWindow(lastDose);
+
+    const tick = () => {
       const now = Date.now();
       const diff = now - lastDose.timestamp;
       const hours = Math.floor(diff / (1000 * 60 * 60));
       const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      const ago = hours > 0 ? `${hours}h ${minutes}m ago` : `${minutes}m ago`;
+      setElapsed(`${protocol.label} · ${ago}`);
 
-      if (hours > 0) {
-        setElapsed(`${hours}h ${minutes}m ago`);
+      if (now < clearAt) {
+        setStatus(`Wait — clear at ${formatClock(clearAt)}`);
+      } else if (now <= stopBy) {
+        setStatus(`Covered — stop by ${formatClock(stopBy)}`);
       } else {
-        setElapsed(`${minutes}m ago`);
+        setStatus(`Window closed at ${formatClock(stopBy)}`);
       }
     };
 
-    updateElapsed();
-    const interval = setInterval(updateElapsed, 60000);
+    tick();
+    const interval = setInterval(tick, 60000);
     return () => clearInterval(interval);
   }, [lastDose]);
 
-  const saveDose = async (timestamp: number) => {
-    // Dose logging MUST succeed even if notification scheduling fails —
-    // recording the dose is the primary purpose of the app; the reminder
-    // is a nice-to-have. Wrap each part in its own try/catch so a failure
-    // in one doesn't block the other.
+  // Schedule the two reminders for a freshly-taken dose. Each is wrapped in its
+  // own try/catch: a notification failure must never block dose logging, which
+  // is the primary purpose of the app.
+  const scheduleReminders = async (kind: DoseKind) => {
+    const protocol = DOSE_PROTOCOLS[kind];
     try {
-      await logDose(timestamp);
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Dose active',
+          body: "Protection is active — you're clear to proceed.",
+        },
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+          seconds: protocol.leadHours * HOUR_SECONDS,
+        },
+      });
+    } catch (e) {
+      console.warn('Failed to schedule lead-time reminder:', e);
+    }
+
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Window closing',
+          body: 'Protection is wearing off — stop soon to stay covered.',
+        },
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+          seconds: protocol.windowHours * HOUR_SECONDS,
+        },
+      });
+    } catch (e) {
+      console.warn('Failed to schedule window-closing reminder:', e);
+    }
+  };
+
+  const saveDose = async (timestamp: number, kind: DoseKind) => {
+    try {
+      await logDose(timestamp, kind);
       await loadLastDose();
       onDoseLogged?.();
     } catch (e) {
@@ -67,150 +123,81 @@ export default function DoseTimer({ onDoseLogged }: Props) {
       return;
     }
 
-    // Only schedule notification if logging for now (within last 5 minutes)
-    const isRecent = Date.now() - timestamp < 5 * 60 * 1000;
-    if (isRecent) {
-      try {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: 'Medication Active',
-            body: '2 hours have passed since your dose.',
-          },
-          trigger: {
-            type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-            seconds: 2 * 60 * 60,
-          },
-        });
-      } catch (e) {
-        // Permissions denied, system in a bad state, etc. Don't crash the dose flow.
-        console.warn('Failed to schedule dose reminder notification:', e);
-      }
+    // Only schedule reminders for a dose taken ~now (back-dated doses have
+    // windows already in the past).
+    if (Date.now() - timestamp < DOSE_RECENT_WINDOW_MS) {
+      await scheduleReminders(kind);
     }
   };
 
-  // Primary action: log now immediately
-  const handleLogNow = async () => {
-    await saveDose(Date.now());
-  };
-
-  // Secondary action: log at a past time
-  const handleLogEarlier = () => {
+  // Earlier-dose flow: pick a time today, then choose which protocol it was.
+  const confirmKindAndSave = (timestamp: number) => {
     Alert.alert(
-      'Log Earlier Dose',
-      'When did you take it?',
+      'Which dose?',
+      `Log a dose at ${formatClock(timestamp)} today.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Earlier today',
-          onPress: () => {
-            setSelectedDate(new Date());
-            setPickerMode('time');
-            setStartedWithTime(true);
-            setShowDatePicker(true);
-          },
+          text: DOSE_PROTOCOLS[DEFAULT_DOSE_KIND].label,
+          onPress: () => saveDose(timestamp, DEFAULT_DOSE_KIND),
         },
         {
-          text: 'Previous day',
-          onPress: () => {
-            setSelectedDate(new Date());
-            setPickerMode('date');
-            setStartedWithTime(false);
-            setShowDatePicker(true);
-          },
+          text: DOSE_PROTOCOLS[SECONDARY_KIND].label,
+          onPress: () => saveDose(timestamp, SECONDARY_KIND),
         },
       ]
     );
   };
 
-  const [startedWithTime, setStartedWithTime] = useState(false);
-
-  const handleDateChange = (_event: any, date?: Date) => {
-    if (date) {
-      setSelectedDate(date);
-    }
+  const handlePickerChange = (date: Date) => {
+    setPickerValue(date);
   };
 
   const handlePickerDone = () => {
-    if (pickerMode === 'date') {
-      // After selecting date, move to time
-      setPickerMode('time');
-    } else if (pickerMode === 'time' && !startedWithTime) {
-      // After selecting time (when we started with date), confirm
-      setShowDatePicker(false);
-      setStartedWithTime(false);
-      Alert.alert(
-        'Confirm',
-        `Log dose at ${selectedDate.toLocaleString()}?`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Confirm',
-            onPress: () => saveDose(selectedDate.getTime()),
-          },
-        ]
-      );
-    } else {
-      // Started with time only (earlier today), confirm with just time
-      setShowDatePicker(false);
-      setStartedWithTime(false);
-      const timeStr = selectedDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-      Alert.alert(
-        'Confirm',
-        `Log dose at ${timeStr} today?`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Confirm',
-            onPress: () => saveDose(selectedDate.getTime()),
-          },
-        ]
-      );
-    }
-  };
-
-  const closePicker = () => {
-    setShowDatePicker(false);
+    setShowPicker(false);
+    confirmKindAndSave(pickerValue.getTime());
   };
 
   return (
     <View style={styles.container}>
-      <Text style={styles.label}>Last Medication</Text>
+      <Text style={styles.label}>Last dose</Text>
       <Text style={styles.timer}>{elapsed}</Text>
-      <TouchableOpacity style={styles.button} onPress={handleLogNow}>
-        <Text style={styles.buttonText}>I took my medication</Text>
-      </TouchableOpacity>
-      <TouchableOpacity style={styles.linkButton} onPress={handleLogEarlier}>
-        <Text style={styles.linkText}>Log earlier dose</Text>
+      {status && <Text style={styles.status}>{status}</Text>}
+
+      {/* Primary: log the default (1-hour) protocol now. */}
+      <TouchableOpacity style={styles.button} onPress={() => saveDose(Date.now(), DEFAULT_DOSE_KIND)}>
+        <Text style={styles.buttonText}>
+          I took my {DOSE_PROTOCOLS[DEFAULT_DOSE_KIND].label} dose
+        </Text>
       </TouchableOpacity>
 
-      <Modal visible={showDatePicker} transparent animationType="fade">
-        <View style={styles.pickerOverlay}>
-          <View style={styles.pickerContainer}>
-            <View style={styles.pickerHeader}>
-              <TouchableOpacity onPress={closePicker}>
-                <Text style={styles.pickerCancel}>Cancel</Text>
-              </TouchableOpacity>
-              <Text style={styles.pickerTitle}>
-                {pickerMode === 'date' ? 'Select Date' : 'Select Time'}
-              </Text>
-              <TouchableOpacity onPress={handlePickerDone}>
-                <Text style={styles.pickerDone}>
-                  {pickerMode === 'date' ? 'Next' : 'Done'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-            <DateTimePicker
-              value={selectedDate}
-              mode={pickerMode}
-              display="spinner"
-              onChange={handleDateChange}
-              maximumDate={new Date()}
-              textColor="#fff"
-              themeVariant="dark"
-            />
-          </View>
-        </View>
-      </Modal>
+      {/* Small link: the other protocol. */}
+      <TouchableOpacity style={styles.linkButton} onPress={() => saveDose(Date.now(), SECONDARY_KIND)}>
+        <Text style={styles.linkText}>Log {DOSE_PROTOCOLS[SECONDARY_KIND].label} dose instead</Text>
+      </TouchableOpacity>
+
+      {/* Small link: earlier dose today (kind chosen after picking the time). */}
+      <TouchableOpacity
+        style={styles.linkButton}
+        onPress={() => {
+          setPickerValue(new Date());
+          setShowPicker(true);
+        }}
+      >
+        <Text style={styles.linkText}>Log earlier dose…</Text>
+      </TouchableOpacity>
+
+      <PickerSheet
+        visible={showPicker}
+        title="Select Time"
+        doneLabel="Next"
+        value={pickerValue}
+        mode="time"
+        maximumDate={new Date()}
+        onChange={handlePickerChange}
+        onDone={handlePickerDone}
+        onCancel={() => setShowPicker(false)}
+      />
     </View>
   );
 }
@@ -230,9 +217,14 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   timer: {
-    fontSize: 32,
+    fontSize: 28,
     fontWeight: 'bold',
     color: '#fff',
+    marginBottom: 4,
+  },
+  status: {
+    fontSize: 14,
+    color: '#4a69bd',
     marginBottom: 16,
   },
   button: {
@@ -240,6 +232,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 8,
+    marginTop: 4,
   },
   buttonText: {
     color: '#fff',
@@ -251,39 +244,7 @@ const styles = StyleSheet.create({
     padding: 4,
   },
   linkText: {
-    color: '#666',
-    fontSize: 13,
-  },
-  pickerOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  pickerContainer: {
-    backgroundColor: '#1a1a2e',
-    borderRadius: 16,
-    padding: 16,
-    width: '90%',
-  },
-  pickerHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  pickerTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#fff',
-  },
-  pickerCancel: {
-    fontSize: 16,
     color: '#888',
-  },
-  pickerDone: {
-    fontSize: 16,
-    color: '#4a69bd',
-    fontWeight: '600',
+    fontSize: 13,
   },
 });

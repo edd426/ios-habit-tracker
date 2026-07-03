@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, Modal } from 'react-native';
-import DateTimePicker from '@react-native-community/datetimepicker';
+import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { Habit } from '@/lib/types';
 import QuantityModal from './QuantityModal';
+import PickerSheet from './PickerSheet';
 
 interface Props {
   habit: Habit;
   count: number;
-  onIncrement: (timestamp?: number) => void;
+  onIncrement: (timestamp?: number, quantity?: number) => void;
   onDecrement: () => void;
   onPress?: () => void;
 }
@@ -48,10 +48,8 @@ export default function HabitCard({ habit, count, onIncrement, onDecrement, onPr
     );
   };
 
-  const handleDateChange = (_event: any, date?: Date) => {
-    if (date) {
-      setSelectedDate(date);
-    }
+  const handleDateChange = (date: Date) => {
+    setSelectedDate(date);
   };
 
   const handlePickerDone = () => {
@@ -68,9 +66,9 @@ export default function HabitCard({ habit, count, onIncrement, onDecrement, onPr
   const handleQuantityConfirm = (quantity: number) => {
     setShowQuantityModal(false);
     const timestamp = pendingTimestamp ?? Date.now();
-    for (let i = 0; i < quantity; i++) {
-      onIncrement(timestamp);
-    }
+    // Single call with the quantity — firing onIncrement N times raced the
+    // storage layer's read-modify-write and only one log survived.
+    onIncrement(timestamp, quantity);
     setPendingTimestamp(null);
   };
 
@@ -113,34 +111,17 @@ export default function HabitCard({ habit, count, onIncrement, onDecrement, onPr
         </View>
       </TouchableOpacity>
 
-      <Modal visible={showDatePicker} transparent animationType="fade">
-        <View style={styles.pickerOverlay}>
-          <View style={styles.pickerContainer}>
-            <View style={styles.pickerHeader}>
-              <TouchableOpacity onPress={closePicker}>
-                <Text style={styles.pickerCancel}>Cancel</Text>
-              </TouchableOpacity>
-              <Text style={styles.pickerTitle}>
-                {pickerMode === 'date' ? 'Select Date' : 'Select Time'}
-              </Text>
-              <TouchableOpacity onPress={handlePickerDone}>
-                <Text style={styles.pickerDone}>
-                  {pickerMode === 'date' ? 'Next' : 'Done'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-            <DateTimePicker
-              value={selectedDate}
-              mode={pickerMode}
-              display="spinner"
-              onChange={handleDateChange}
-              maximumDate={new Date()}
-              textColor="#fff"
-              themeVariant="dark"
-            />
-          </View>
-        </View>
-      </Modal>
+      <PickerSheet
+        visible={showDatePicker}
+        title={pickerMode === 'date' ? 'Select Date' : 'Select Time'}
+        doneLabel={pickerMode === 'date' ? 'Next' : 'Done'}
+        value={selectedDate}
+        mode={pickerMode}
+        maximumDate={new Date()}
+        onChange={handleDateChange}
+        onDone={handlePickerDone}
+        onCancel={closePicker}
+      />
 
       <QuantityModal
         visible={showQuantityModal}
@@ -212,38 +193,6 @@ const styles = StyleSheet.create({
   incrementText: {
     color: '#fff',
     fontSize: 16,
-    fontWeight: '600',
-  },
-  pickerOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  pickerContainer: {
-    backgroundColor: '#1a1a2e',
-    borderRadius: 16,
-    padding: 16,
-    width: '90%',
-  },
-  pickerHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  pickerTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#fff',
-  },
-  pickerCancel: {
-    fontSize: 16,
-    color: '#888',
-  },
-  pickerDone: {
-    fontSize: 16,
-    color: '#4a69bd',
     fontWeight: '600',
   },
 });

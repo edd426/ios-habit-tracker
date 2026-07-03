@@ -4,7 +4,7 @@ import { useFocusEffect } from 'expo-router';
 
 import DoseTimer from '@/components/DoseTimer';
 import HabitCard from '@/components/HabitCard';
-import { getHabits, getAllTodayCounts, logHabit, removeLastTodayLog } from '@/lib/storage';
+import { getHabits, getAllTodayCounts, logHabitBatch, removeLastTodayLog } from '@/lib/storage';
 import { Habit } from '@/lib/types';
 
 export default function HomeScreen() {
@@ -30,8 +30,8 @@ export default function HomeScreen() {
     setRefreshing(false);
   };
 
-  const handleIncrement = async (habitId: string, timestamp?: number) => {
-    await logHabit(habitId, timestamp);
+  const handleIncrement = async (habitId: string, timestamp?: number, quantity: number = 1) => {
+    await logHabitBatch(habitId, timestamp ?? Date.now(), quantity);
     // Reload counts to get accurate today's count (in case logging for a past day)
     const newCounts = await getAllTodayCounts();
     setCounts(newCounts);
@@ -63,7 +63,7 @@ export default function HomeScreen() {
               key={habit.id}
               habit={habit}
               count={counts[habit.id] || 0}
-              onIncrement={(timestamp) => handleIncrement(habit.id, timestamp)}
+              onIncrement={(timestamp, quantity) => handleIncrement(habit.id, timestamp, quantity)}
               onDecrement={() => handleDecrement(habit.id)}
             />
           ))

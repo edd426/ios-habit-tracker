@@ -6,15 +6,13 @@ import {
   ScrollView,
   TouchableOpacity,
   Alert,
-  Modal,
 } from 'react-native';
 import { useFocusEffect } from 'expo-router';
-import DateTimePicker from '@react-native-community/datetimepicker';
 import {
   getHabits,
   getLogsForDate,
   getDoseLogsForDate,
-  logHabit,
+  logHabitBatch,
   logDose,
   updateLog,
   updateDoseLog,
@@ -22,7 +20,15 @@ import {
   deleteDoseLog,
 } from '@/lib/storage';
 import { Habit, HabitLog, DoseLog } from '@/lib/types';
+import {
+  DoseKind,
+  DOSE_KINDS,
+  DOSE_PROTOCOLS,
+  DEFAULT_DOSE_KIND,
+  LEGACY_DOSE_KIND,
+} from '@/lib/dose-protocols';
 import QuantityModal from '@/components/QuantityModal';
+import PickerSheet from '@/components/PickerSheet';
 
 export default function HistoryScreen() {
   const [selectedDate, setSelectedDate] = useState(new Date());
@@ -34,8 +40,7 @@ export default function HistoryScreen() {
   // Modal states
   const [showTimePicker, setShowTimePicker] = useState(false);
   const [timePickerValue, setTimePickerValue] = useState(new Date());
-  const [timePickerKey, setTimePickerKey] = useState(0); // Force re-mount picker
-  const selectedTimeRef = useRef(new Date()); // Track selection without re-render
+  const selectedTimeRef = useRef(new Date()); // The full date+time to save on Done
   const baseDateRef = useRef(new Date()); // Store base date for time picker (avoids stale state reads)
   const [editingLog, setEditingLog] = useState<{ type: 'habit' | 'dose'; id: string } | null>(null);
   const [addingForHabit, setAddingForHabit] = useState<string | null>(null);
@@ -103,10 +108,8 @@ export default function HistoryScreen() {
     }
   };
 
-  const handleDateChange = (_event: any, date?: Date) => {
-    if (date) {
-      setSelectedDate(date);
-    }
+  const handleDateChange = (date: Date) => {
+    setSelectedDate(date);
   };
 
   const isToday = () => {
@@ -120,23 +123,18 @@ export default function HistoryScreen() {
 
   // Edit time handlers
   const handleEditLog = (type: 'habit' | 'dose', id: string, timestamp: number) => {
-    const originalTime = new Date(timestamp);
     setEditingLog({ type, id });
-    setTimePickerValue(originalTime);
-    selectedTimeRef.current = originalTime;
-    baseDateRef.current = originalTime; // Store base date for time picker
-    setTimePickerKey(k => k + 1); // Force fresh picker instance
-    setTimeout(() => setShowTimePicker(true), 50);
+    openTimePickerAt(new Date(timestamp));
   };
 
-  const handleTimePickerChange = (_e: any, date?: Date) => {
-    if (date) {
-      // Store in ref to avoid re-render during scroll
-      // Combine selected time with the base date (from ref, not state, to avoid stale reads)
-      const newDateTime = new Date(baseDateRef.current);
-      newDateTime.setHours(date.getHours(), date.getMinutes(), 0, 0);
-      selectedTimeRef.current = newDateTime;
-    }
+  const handleTimePickerChange = (date: Date) => {
+    // Combine selected time with the base date (from ref, not state, to avoid stale reads)
+    const newDateTime = new Date(baseDateRef.current);
+    newDateTime.setHours(date.getHours(), date.getMinutes(), 0, 0);
+    selectedTimeRef.current = newDateTime;
+    // The picker is a CONTROLLED component: its value prop must track every
+    // change, or the native side snaps the wheels back to the stale prop.
+    setTimePickerValue(newDateTime);
   };
 
   const handleTimePickerDone = async () => {
@@ -152,8 +150,8 @@ export default function HistoryScreen() {
       setEditingLog(null);
       loadData();
     } else if (addingDose) {
-      // Adding new dose
-      await logDose(finalTime);
+      // New doses default to the primary protocol; adjust on the row if needed.
+      await logDose(finalTime, DEFAULT_DOSE_KIND);
       setAddingDose(false);
       loadData();
     } else if (addingForHabit) {
@@ -166,9 +164,8 @@ export default function HistoryScreen() {
   const handleQuantityConfirm = async (quantity: number) => {
     setShowQuantityModal(false);
     if (addingForHabit && pendingAddTime !== null) {
-      for (let i = 0; i < quantity; i++) {
-        await logHabit(addingForHabit, pendingAddTime);
-      }
+      // One collection write (and one iCloud push) for all N entries.
+      await logHabitBatch(addingForHabit, pendingAddTime, quantity);
       setAddingForHabit(null);
       setPendingAddTime(null);
       loadData();
@@ -186,6 +183,13 @@ export default function HistoryScreen() {
     setEditingLog(null);
     setAddingDose(false);
     setAddingForHabit(null);
+  };
+
+  // Set a dose's protocol directly from the inline segmented control.
+  const setDoseKind = async (log: DoseLog, kind: DoseKind) => {
+    if ((log.kind ?? LEGACY_DOSE_KIND) === kind) return; // no-op if unchanged
+    await updateDoseLog(log.id, { kind });
+    loadData();
   };
 
   // Delete handlers
@@ -208,9 +212,14 @@ export default function HistoryScreen() {
   };
 
   // Add handlers
-  const handleAddHabitLog = (habitId: string) => {
-    setAddingForHabit(habitId);
-    // Set default time based on selected date
+  const openTimePickerAt = (defaultTime: Date) => {
+    setTimePickerValue(defaultTime);
+    selectedTimeRef.current = defaultTime;
+    baseDateRef.current = defaultTime; // Store base date for time picker
+    setShowTimePicker(true);
+  };
+
+  const defaultTimeForSelectedDate = () => {
     const defaultTime = new Date(selectedDate);
     if (isToday()) {
       const now = new Date();
@@ -218,27 +227,17 @@ export default function HistoryScreen() {
     } else {
       defaultTime.setHours(12, 0, 0, 0);
     }
-    setTimePickerValue(defaultTime);
-    selectedTimeRef.current = defaultTime;
-    baseDateRef.current = defaultTime; // Store base date for time picker
-    setTimePickerKey(k => k + 1); // Force fresh picker instance
-    setTimeout(() => setShowTimePicker(true), 50);
+    return defaultTime;
+  };
+
+  const handleAddHabitLog = (habitId: string) => {
+    setAddingForHabit(habitId);
+    openTimePickerAt(defaultTimeForSelectedDate());
   };
 
   const handleAddDose = () => {
     setAddingDose(true);
-    const defaultTime = new Date(selectedDate);
-    if (isToday()) {
-      const now = new Date();
-      defaultTime.setHours(now.getHours(), now.getMinutes(), 0, 0);
-    } else {
-      defaultTime.setHours(12, 0, 0, 0);
-    }
-    setTimePickerValue(defaultTime);
-    selectedTimeRef.current = defaultTime;
-    baseDateRef.current = defaultTime; // Store base date for time picker
-    setTimePickerKey(k => k + 1); // Force fresh picker instance
-    setTimeout(() => setShowTimePicker(true), 50);
+    openTimePickerAt(defaultTimeForSelectedDate());
   };
 
   // Group habit logs by habit
@@ -277,7 +276,25 @@ export default function HistoryScreen() {
           ) : (
             doseLogs.map(log => (
               <View key={log.id} style={styles.logRow}>
-                <Text style={styles.logTime}>{formatTime(log.timestamp)}</Text>
+                <View style={styles.logLeft}>
+                  <Text style={styles.logTime}>{formatTime(log.timestamp)}</Text>
+                  <View style={styles.kindToggle}>
+                    {DOSE_KINDS.map(k => {
+                      const active = (log.kind ?? LEGACY_DOSE_KIND) === k;
+                      return (
+                        <TouchableOpacity
+                          key={k}
+                          style={[styles.kindOption, active && styles.kindOptionActive]}
+                          onPress={() => setDoseKind(log, k)}
+                        >
+                          <Text style={[styles.kindOptionText, active && styles.kindOptionTextActive]}>
+                            {DOSE_PROTOCOLS[k].label}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
                 <View style={styles.logActions}>
                   <TouchableOpacity
                     style={styles.actionButton}
@@ -349,61 +366,30 @@ export default function HistoryScreen() {
         )}
       </ScrollView>
 
-      {/* Date Picker Modal */}
-      <Modal visible={showDatePicker} transparent animationType="fade">
-        <View style={styles.pickerOverlay}>
-          <View style={styles.pickerContainer}>
-            <View style={styles.pickerHeader}>
-              <TouchableOpacity onPress={() => setShowDatePicker(false)}>
-                <Text style={styles.pickerCancel}>Cancel</Text>
-              </TouchableOpacity>
-              <Text style={styles.pickerTitle}>Select Date</Text>
-              <TouchableOpacity onPress={() => setShowDatePicker(false)}>
-                <Text style={styles.pickerDone}>Done</Text>
-              </TouchableOpacity>
-            </View>
-            <DateTimePicker
-              value={selectedDate}
-              mode="date"
-              display="spinner"
-              onChange={handleDateChange}
-              maximumDate={new Date()}
-              textColor="#fff"
-              themeVariant="dark"
-            />
-          </View>
-        </View>
-      </Modal>
+      {/* Date Picker */}
+      <PickerSheet
+        visible={showDatePicker}
+        title="Select Date"
+        doneLabel="Done"
+        value={selectedDate}
+        mode="date"
+        maximumDate={new Date()}
+        onChange={handleDateChange}
+        onDone={() => setShowDatePicker(false)}
+        onCancel={() => setShowDatePicker(false)}
+      />
 
-      {/* Time Picker Modal */}
-      <Modal visible={showTimePicker} transparent animationType="fade">
-        <View style={styles.pickerOverlay}>
-          <View style={styles.pickerContainer}>
-            <View style={styles.pickerHeader}>
-              <TouchableOpacity onPress={handleTimePickerCancel}>
-                <Text style={styles.pickerCancel}>Cancel</Text>
-              </TouchableOpacity>
-              <Text style={styles.pickerTitle}>
-                {editingLog ? 'Edit Time' : 'Select Time'}
-              </Text>
-              <TouchableOpacity onPress={handleTimePickerDone}>
-                <Text style={styles.pickerDone}>
-                  {addingForHabit ? 'Next' : 'Done'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-            <DateTimePicker
-              key={timePickerKey}
-              value={timePickerValue}
-              mode="time"
-              display="spinner"
-              onChange={handleTimePickerChange}
-              textColor="#fff"
-              themeVariant="dark"
-            />
-          </View>
-        </View>
-      </Modal>
+      {/* Time Picker */}
+      <PickerSheet
+        visible={showTimePicker}
+        title={editingLog ? 'Edit Time' : 'Select Time'}
+        doneLabel={addingForHabit ? 'Next' : 'Done'}
+        value={timePickerValue}
+        mode="time"
+        onChange={handleTimePickerChange}
+        onDone={handleTimePickerDone}
+        onCancel={handleTimePickerCancel}
+      />
 
       {/* Quantity Modal */}
       <QuantityModal
@@ -505,6 +491,32 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#fff',
   },
+  logLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  kindToggle: {
+    flexDirection: 'row',
+    backgroundColor: '#1a1a3e',
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  kindOption: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  kindOptionActive: {
+    backgroundColor: '#4a69bd',
+  },
+  kindOptionText: {
+    fontSize: 12,
+    color: '#888',
+    fontWeight: '500',
+  },
+  kindOptionTextActive: {
+    color: '#fff',
+  },
   logActions: {
     flexDirection: 'row',
     gap: 8,
@@ -547,37 +559,5 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 40,
     paddingHorizontal: 32,
-  },
-  pickerOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  pickerContainer: {
-    backgroundColor: '#1a1a2e',
-    borderRadius: 16,
-    padding: 16,
-    width: '90%',
-  },
-  pickerHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  pickerTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#fff',
-  },
-  pickerCancel: {
-    fontSize: 16,
-    color: '#888',
-  },
-  pickerDone: {
-    fontSize: 16,
-    color: '#4a69bd',
-    fontWeight: '600',
   },
 });
