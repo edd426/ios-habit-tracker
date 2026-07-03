@@ -18,7 +18,15 @@ import FontAwesome from '@expo/vector-icons/FontAwesome';
 import * as Clipboard from 'expo-clipboard';
 import Constants from 'expo-constants';
 
-import { getHabits, addHabit, updateHabit, deleteHabit, buildExportPayload } from '@/lib/storage';
+import {
+  getHabits,
+  addHabit,
+  updateHabit,
+  deleteHabit,
+  buildExportPayload,
+  getSyncDataSize,
+  ICLOUD_KV_LIMIT_BYTES,
+} from '@/lib/storage';
 import { Habit } from '@/lib/types';
 import { useAuth } from '@/contexts/AuthContext';
 import { SyncStatus } from '@/components/SyncStatus';
@@ -29,12 +37,14 @@ export default function SettingsScreen() {
   const [editingHabit, setEditingHabit] = useState<Habit | null>(null);
   const [name, setName] = useState('');
   const [type, setType] = useState<'increase' | 'decrease'>('decrease');
+  const [syncBytes, setSyncBytes] = useState<number | null>(null);
 
   const { userId, syncStatus, triggerSync } = useAuth();
 
   const loadHabits = useCallback(async () => {
-    const h = await getHabits();
+    const [h, size] = await Promise.all([getHabits(), getSyncDataSize()]);
     setHabits(h);
+    setSyncBytes(size.totalBytes);
   }, []);
 
   const copyUserId = async () => {
@@ -122,6 +132,22 @@ export default function SettingsScreen() {
     );
   };
 
+  // Sync-size gauge. Past ICLOUD_KV_LIMIT_BYTES the KV store fails silently, so
+  // warn well before the ceiling: amber at ~70%, red at ~90%.
+  const kb = (bytes: number) => Math.round(bytes / 1024).toLocaleString();
+  const syncSizeText =
+    syncBytes === null
+      ? '…'
+      : `${kb(syncBytes)} KB of ${kb(ICLOUD_KV_LIMIT_BYTES)} KB`;
+  const syncSizeColor =
+    syncBytes === null
+      ? '#fff'
+      : syncBytes >= 900 * 1024
+        ? '#e74c3c'
+        : syncBytes >= 700 * 1024
+          ? '#f39c12'
+          : '#fff';
+
   return (
     <View style={styles.container}>
       <ScrollView style={styles.scrollView}>
@@ -142,6 +168,17 @@ export default function SettingsScreen() {
               <FontAwesome name="copy" size={16} color="#888" />
             </TouchableOpacity>
           )}
+          <View style={styles.syncSizeRow}>
+            <View style={styles.syncSizeInfo}>
+              <Text style={styles.syncSizeLabel}>Sync data size</Text>
+              <Text style={[styles.syncSizeValue, { color: syncSizeColor }]}>
+                {syncSizeText}
+              </Text>
+              <Text style={styles.syncSizeHint}>
+                iCloud sync stops silently past 1 MB — archive old logs before then
+              </Text>
+            </View>
+          </View>
           <Text style={styles.syncHint}>
             Save your User ID to recover your data if you reinstall the app
           </Text>
@@ -477,6 +514,33 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   syncHint: {
+    fontSize: 12,
+    color: '#666',
+    marginTop: 4,
+    lineHeight: 18,
+  },
+  syncSizeRow: {
+    backgroundColor: '#16213e',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  syncSizeInfo: {
+    flex: 1,
+  },
+  syncSizeLabel: {
+    fontSize: 14,
+    color: '#888',
+    marginBottom: 4,
+  },
+  syncSizeValue: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  syncSizeHint: {
     fontSize: 12,
     color: '#666',
     marginTop: 4,
