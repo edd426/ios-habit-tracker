@@ -309,6 +309,14 @@ export default function SettingsScreen() {
               </Text>
             </Text>
           </View>
+          <View style={[styles.aboutRow, styles.aboutRowSpacing]}>
+            <Text style={styles.aboutLabel}>Built</Text>
+            <Text style={styles.aboutValue}>
+              {Constants.expoConfig?.extra?.buildDate
+                ? new Date(Constants.expoConfig.extra.buildDate as string).toLocaleString()
+                : 'unknown'}
+            </Text>
+          </View>
         </View>
       </ScrollView>
 
@@ -690,6 +698,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#fff',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  aboutRowSpacing: {
+    marginTop: 8,
   },
   debugBadge: {
     color: '#e74c3c',

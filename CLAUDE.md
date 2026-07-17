@@ -131,6 +131,10 @@ If the build ends with `CommandError: Cannot launch HabitTracker on ... device i
 
 A Release build needs **~8 GB of free disk** on the dev Mac for DerivedData + intermediate artifacts. If the user is on a small SSD, check `df -h ~` before kicking off — sub-8 GB often produces a cryptic `No space left on device` error mid-compile. Quick wins: `rm -rf ~/Library/Developer/Xcode/DerivedData` (regenerates), `rm -rf ~/.npm/_cacache`.
 
+### Verifying which build is on the phone
+
+`app.config.js` stamps `extra.buildDate` with the bundle time on every build; Settings → About shows it as the "Built" row. **No manual version bump is needed for day-to-day installs** — after installing, have the user check that the Built date/time matches the just-finished build. Bump `version` in `app.json` only for meaningful feature releases (it's the "v1.0.0" in the same About section).
+
 ## Development Commands
 
 ```bash
