@@ -133,7 +133,7 @@ A Release build needs **~8 GB of free disk** on the dev Mac for DerivedData + in
 
 ### Verifying which build is on the phone
 
-`app.config.js` stamps `extra.buildDate` with the bundle time on every build; Settings → About shows it as the "Built" row. **No manual version bump is needed for day-to-day installs** — after installing, have the user check that the Built date/time matches the just-finished build. Bump `version` in `app.json` only for meaningful feature releases (it's the "v1.0.0" in the same About section).
+`app.config.js` stamps `extra.buildDate` with the bundle time on every build; Settings → About shows it as the "Built" row. **No manual version bump is needed for day-to-day installs** — after installing, have the user check that the Built date/time matches the just-finished build. Separately, bump `version` in `app.json` (the "v1.1.0" in the same About section) whenever a session ships user-visible features or fixes — Evan uses it to tell feature releases apart, so err toward bumping.
 
 ## Development Commands
 
