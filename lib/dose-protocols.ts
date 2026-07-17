@@ -49,10 +49,29 @@ const HOUR_MS = 60 * 60 * 1000;
  *  - `stopBy`:  when protection wears off    (dose + windowHours)
  * Pure and timezone-agnostic (operates on epoch ms) so it's trivially testable.
  */
-export function doseWindow(dose: DoseLog): { clearAt: number; stopBy: number } {
+export function doseWindow(
+  dose: Pick<DoseLog, 'timestamp' | 'kind'>
+): { clearAt: number; stopBy: number } {
   const p = protocolFor(dose);
   return {
     clearAt: dose.timestamp + p.leadHours * HOUR_MS,
     stopBy: dose.timestamp + p.windowHours * HOUR_MS,
   };
+}
+
+/**
+ * Seconds from `now` until each reminder for a dose, anchored to the DOSE
+ * timestamp (not to when the user pressed the button). A milestone already in
+ * the past is `null` — so a back-dated dose still gets whichever reminders
+ * remain in the future, and a dose whose window has fully closed gets none.
+ * Pure (epoch ms in, seconds out) so it's trivially testable.
+ */
+export function reminderDelaysSeconds(
+  dose: Pick<DoseLog, 'timestamp' | 'kind'>,
+  now: number
+): { toClear: number | null; toStop: number | null } {
+  const { clearAt, stopBy } = doseWindow(dose);
+  const delay = (target: number) =>
+    target > now ? Math.ceil((target - now) / 1000) : null;
+  return { toClear: delay(clearAt), toStop: delay(stopBy) };
 }

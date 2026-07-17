@@ -11,6 +11,7 @@ export const KEYS = {
   HABITS: 'habits',
   HABIT_LOGS: 'habit_logs',
   DOSE_LOGS: 'dose_logs',
+  BUG_REPORTS: 'bug_reports',
   LAST_SYNC: 'last_sync_timestamp',
   // Local-only: tracks which one-time data migrations have run on THIS device.
   // Intentionally NOT in ICLOUD_KEYS — migration state is per-device.
@@ -21,5 +22,6 @@ export const ICLOUD_KEYS = {
   HABITS: 'habits',
   HABIT_LOGS: 'habit_logs',
   DOSE_LOGS: 'dose_logs',
+  BUG_REPORTS: 'bug_reports',
   LAST_SYNC: 'last_sync',
 } as const;

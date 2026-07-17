@@ -26,11 +26,11 @@ describe('sync/write serialization', () => {
   });
 
   it('a habit logged while a sync is in flight is not erased by the merge write', async () => {
-    // Start a sync; all three collections read local state, then block on
-    // their (mocked) remote reads.
+    // Start a sync; all four collections (habits, habit logs, dose logs,
+    // bug reports) read local state, then block on their (mocked) remote reads.
     const syncPromise = syncAllData('user-1');
     await new Promise((r) => setImmediate(r));
-    expect(mockPendingRemoteReads).toHaveLength(3);
+    expect(mockPendingRemoteReads).toHaveLength(4);
 
     // A local write lands mid-sync. Without per-key serialization, the sync's
     // merged write-back (computed from the PRE-write local read) would erase it.

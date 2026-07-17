@@ -33,6 +33,22 @@ export interface HabitLog extends BaseEntity {
  */
 export type DoseKind = 'fast' | 'slow';
 
+/**
+ * An in-app bug report, captured at the moment of annoyance. Stays `open`
+ * until the fix ships and the user marks it resolved in Settings — the bug
+ * export only includes open reports, so resolved ones drop out of the
+ * dev-session handoff automatically.
+ */
+export interface BugReport extends BaseEntity {
+  text: string;
+  /** Which screen the user was on when reporting (auto-captured). */
+  screen?: string;
+  /** App version at report time (auto-captured). */
+  appVersion?: string;
+  status: 'open' | 'resolved';
+  resolvedAt?: number;
+}
+
 export interface DoseLog extends BaseEntity {
   timestamp: number;
   // Optional for backward compatibility: doses logged before the two-protocol

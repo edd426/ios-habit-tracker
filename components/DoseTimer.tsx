@@ -9,15 +9,14 @@ import {
   DEFAULT_DOSE_KIND,
   protocolFor,
   doseWindow,
+  reminderDelaysSeconds,
 } from '@/lib/dose-protocols';
-import { DOSE_RECENT_WINDOW_MS } from '@/lib/constants';
 import PickerSheet from './PickerSheet';
 
 interface Props {
   onDoseLogged?: () => void;
 }
 
-const HOUR_SECONDS = 60 * 60;
 // The non-default kind, for the "log the other one" link.
 const SECONDARY_KIND: DoseKind = DEFAULT_DOSE_KIND === 'fast' ? 'slow' : 'fast';
 
@@ -73,39 +72,46 @@ export default function DoseTimer({ onDoseLogged }: Props) {
     return () => clearInterval(interval);
   }, [lastDose]);
 
-  // Schedule the two reminders for a freshly-taken dose. Each is wrapped in its
-  // own try/catch: a notification failure must never block dose logging, which
+  // Schedule the reminders whose milestones are still in the future, anchored
+  // to the DOSE timestamp — so a back-dated dose ("Log earlier dose…") still
+  // notifies at the true clear/stop-by times. Each is wrapped in its own
+  // try/catch: a notification failure must never block dose logging, which
   // is the primary purpose of the app.
-  const scheduleReminders = async (kind: DoseKind) => {
-    const protocol = DOSE_PROTOCOLS[kind];
-    try {
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: 'Dose active',
-          body: "Protection is active — you're clear to proceed.",
-        },
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-          seconds: protocol.leadHours * HOUR_SECONDS,
-        },
-      });
-    } catch (e) {
-      console.warn('Failed to schedule lead-time reminder:', e);
+  const scheduleReminders = async (timestamp: number, kind: DoseKind) => {
+    const { toClear, toStop } = reminderDelaysSeconds({ timestamp, kind }, Date.now());
+
+    if (toClear !== null) {
+      try {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: 'Dose active',
+            body: "Protection is active — you're clear to proceed.",
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+            seconds: toClear,
+          },
+        });
+      } catch (e) {
+        console.warn('Failed to schedule lead-time reminder:', e);
+      }
     }
 
-    try {
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: 'Window closing',
-          body: 'Protection is wearing off — stop soon to stay covered.',
-        },
-        trigger: {
-          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-          seconds: protocol.windowHours * HOUR_SECONDS,
-        },
-      });
-    } catch (e) {
-      console.warn('Failed to schedule window-closing reminder:', e);
+    if (toStop !== null) {
+      try {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: 'Window closing',
+            body: 'Protection is wearing off — stop soon to stay covered.',
+          },
+          trigger: {
+            type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+            seconds: toStop,
+          },
+        });
+      } catch (e) {
+        console.warn('Failed to schedule window-closing reminder:', e);
+      }
     }
   };
 
@@ -123,11 +129,7 @@ export default function DoseTimer({ onDoseLogged }: Props) {
       return;
     }
 
-    // Only schedule reminders for a dose taken ~now (back-dated doses have
-    // windows already in the past).
-    if (Date.now() - timestamp < DOSE_RECENT_WINDOW_MS) {
-      await scheduleReminders(kind);
-    }
+    await scheduleReminders(timestamp, kind);
   };
 
   // Earlier-dose flow: pick a time today, then choose which protocol it was.

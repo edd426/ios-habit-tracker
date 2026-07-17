@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BaseEntity, Habit, HabitLog, DoseLog } from './types';
+import { BaseEntity, Habit, HabitLog, DoseLog, BugReport } from './types';
 import {
   initializeICloud,
   isICloudAvailable,
@@ -150,6 +150,7 @@ export async function syncAllData(userId: string): Promise<void> {
           syncDataType<Habit>(KEYS.HABITS, ICLOUD_KEYS.HABITS),
           syncDataType<HabitLog>(KEYS.HABIT_LOGS, ICLOUD_KEYS.HABIT_LOGS),
           syncDataType<DoseLog>(KEYS.DOSE_LOGS, ICLOUD_KEYS.DOSE_LOGS),
+          syncDataType<BugReport>(KEYS.BUG_REPORTS, ICLOUD_KEYS.BUG_REPORTS),
         ]),
         SYNC_TIMEOUT_MS,
         'iCloud sync'

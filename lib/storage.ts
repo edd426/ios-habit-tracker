@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BaseEntity, Habit, HabitLog, DoseLog } from './types';
+import { BaseEntity, Habit, HabitLog, DoseLog, BugReport } from './types';
 import { pushCollectionToICloud } from './sync';
 import { getCurrentUserId } from './auth';
 import { safeParse } from './safe-json';
@@ -221,6 +221,76 @@ export async function getLastDose(): Promise<DoseLog | null> {
   );
 }
 
+// Bug Reports
+
+/** Open (unresolved) bug reports, newest first. */
+export async function getOpenBugReports(): Promise<BugReport[]> {
+  const data = await AsyncStorage.getItem(KEYS.BUG_REPORTS);
+  const reports: BugReport[] = safeParse(data, []);
+  return reports
+    .filter((r) => !r.deleted && r.status === 'open')
+    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+}
+
+export async function addBugReport(
+  text: string,
+  screen?: string,
+  appVersion?: string
+): Promise<BugReport> {
+  const now = Date.now();
+  const report: BugReport = {
+    id: generateId(),
+    text,
+    screen,
+    appVersion,
+    status: 'open',
+    createdAt: now,
+    updatedAt: now,
+  };
+  await mutateCollection<BugReport>(KEYS.BUG_REPORTS, ICLOUD_KEYS.BUG_REPORTS, (items) => [
+    ...items,
+    report,
+  ]);
+  return report;
+}
+
+/**
+ * Mark a bug fixed. Resolved reports drop out of the open list and the bug
+ * export, but stick around (until deleted) as a record of what was fixed.
+ */
+export async function resolveBugReport(id: string): Promise<void> {
+  const now = Date.now();
+  await mutateCollection<BugReport>(KEYS.BUG_REPORTS, ICLOUD_KEYS.BUG_REPORTS, (items) =>
+    items.map((r) =>
+      r.id === id ? { ...r, status: 'resolved' as const, resolvedAt: now, updatedAt: now } : r
+    )
+  );
+}
+
+export async function deleteBugReport(id: string): Promise<void> {
+  // Tombstone rather than remove — see deleteDoseLog.
+  await mutateCollection<BugReport>(KEYS.BUG_REPORTS, ICLOUD_KEYS.BUG_REPORTS, (items) =>
+    items.map((r) => (r.id === id ? { ...r, deleted: true, updatedAt: Date.now() } : r))
+  );
+}
+
+/**
+ * Human-readable export of open bug reports, for pasting into a dev session.
+ * Deliberately NOT JSON — this is read by a person (or Claude) triaging bugs,
+ * not re-imported by the app. IDs are included so "resolve these three" is
+ * unambiguous even when two reports have similar text.
+ */
+export function formatBugReports(reports: BugReport[]): string {
+  if (reports.length === 0) return 'No open bug reports.';
+  const lines = reports.map((r) => {
+    const when = r.createdAt ? new Date(r.createdAt).toISOString() : 'unknown time';
+    const where = r.screen ? ` · ${r.screen} screen` : '';
+    const version = r.appVersion ? ` · v${r.appVersion}` : '';
+    return `- [${r.id}] ${when}${where}${version}\n  ${r.text}`;
+  });
+  return `Open bug reports (${reports.length}):\n\n${lines.join('\n\n')}`;
+}
+
 // Date-based queries and log management
 
 /** Items whose timestamp falls on `date`'s local day, sorted ascending. */
@@ -322,12 +392,14 @@ export async function gcCollection<T extends BaseEntity>(
 export async function runStartupGc(): Promise<void> {
   await withTimeout(
     (async () => {
-      const [habits, habitLogs, doseLogs] = [
+      const [habits, habitLogs, doseLogs, bugReports] = [
         await gcCollection<Habit>(KEYS.HABITS, ICLOUD_KEYS.HABITS),
         await gcCollection<HabitLog>(KEYS.HABIT_LOGS, ICLOUD_KEYS.HABIT_LOGS),
         await gcCollection<DoseLog>(KEYS.DOSE_LOGS, ICLOUD_KEYS.DOSE_LOGS),
+        await gcCollection<BugReport>(KEYS.BUG_REPORTS, ICLOUD_KEYS.BUG_REPORTS),
       ];
-      const total = habits.removed + habitLogs.removed + doseLogs.removed;
+      const total =
+        habits.removed + habitLogs.removed + doseLogs.removed + bugReports.removed;
       if (total > 0) {
         console.log(
           `GC: hard-deleted ${total} soft-deleted records older than ${GC_GRACE_DAYS} days`
@@ -351,7 +423,7 @@ export async function getSyncDataSize(): Promise<{
   perKey: Record<string, number>;
   totalBytes: number;
 }> {
-  const keys = [KEYS.HABITS, KEYS.HABIT_LOGS, KEYS.DOSE_LOGS];
+  const keys = [KEYS.HABITS, KEYS.HABIT_LOGS, KEYS.DOSE_LOGS, KEYS.BUG_REPORTS];
   const perKey: Record<string, number> = {};
   let totalBytes = 0;
   for (const key of keys) {
@@ -369,10 +441,11 @@ export interface ExportPayload {
   exportedAt: number;
   exportedAtISO: string;
   userId: string | null;
-  schemaVersion: 2;
+  schemaVersion: 3;
   habits: Habit[];
   habitLogs: HabitLog[];
   doseLogs: DoseLog[];
+  bugReports: BugReport[];
   lastSync: number | null;
 }
 
@@ -381,10 +454,11 @@ export interface ExportPayload {
  * Includes soft-deleted rows so the export is a faithful snapshot.
  */
 export async function buildExportPayload(): Promise<ExportPayload> {
-  const [habitsRaw, habitLogsRaw, doseLogsRaw, lastSyncRaw] = await Promise.all([
+  const [habitsRaw, habitLogsRaw, doseLogsRaw, bugReportsRaw, lastSyncRaw] = await Promise.all([
     AsyncStorage.getItem(KEYS.HABITS),
     AsyncStorage.getItem(KEYS.HABIT_LOGS),
     AsyncStorage.getItem(KEYS.DOSE_LOGS),
+    AsyncStorage.getItem(KEYS.BUG_REPORTS),
     AsyncStorage.getItem(KEYS.LAST_SYNC),
   ]);
 
@@ -393,10 +467,11 @@ export async function buildExportPayload(): Promise<ExportPayload> {
     exportedAt: now,
     exportedAtISO: new Date(now).toISOString(),
     userId: getCurrentUserId(),
-    schemaVersion: 2,
+    schemaVersion: 3,
     habits: safeParse<Habit[]>(habitsRaw, []),
     habitLogs: safeParse<HabitLog[]>(habitLogsRaw, []),
     doseLogs: safeParse<DoseLog[]>(doseLogsRaw, []),
+    bugReports: safeParse<BugReport[]>(bugReportsRaw, []),
     lastSync: lastSyncRaw ? parseInt(lastSyncRaw, 10) : null,
   };
 }

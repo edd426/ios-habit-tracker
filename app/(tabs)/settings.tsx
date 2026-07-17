@@ -25,9 +25,12 @@ import {
   deleteHabit,
   buildExportPayload,
   getSyncDataSize,
+  getOpenBugReports,
+  resolveBugReport,
+  formatBugReports,
   ICLOUD_KV_LIMIT_BYTES,
 } from '@/lib/storage';
-import { Habit } from '@/lib/types';
+import { Habit, BugReport } from '@/lib/types';
 import { useAuth } from '@/contexts/AuthContext';
 import { SyncStatus } from '@/components/SyncStatus';
 
@@ -38,13 +41,19 @@ export default function SettingsScreen() {
   const [name, setName] = useState('');
   const [type, setType] = useState<'increase' | 'decrease'>('decrease');
   const [syncBytes, setSyncBytes] = useState<number | null>(null);
+  const [bugReports, setBugReports] = useState<BugReport[]>([]);
 
   const { userId, syncStatus, triggerSync } = useAuth();
 
   const loadHabits = useCallback(async () => {
-    const [h, size] = await Promise.all([getHabits(), getSyncDataSize()]);
+    const [h, size, bugs] = await Promise.all([
+      getHabits(),
+      getSyncDataSize(),
+      getOpenBugReports(),
+    ]);
     setHabits(h);
     setSyncBytes(size.totalBytes);
+    setBugReports(bugs);
   }, []);
 
   const copyUserId = async () => {
@@ -71,6 +80,34 @@ export default function SettingsScreen() {
     } catch (e) {
       Alert.alert('Export failed', String(e));
     }
+  };
+
+  const handleExportBugs = async () => {
+    try {
+      const text = formatBugReports(bugReports);
+      await Clipboard.setStringAsync(text);
+      Alert.alert(
+        'Copied',
+        bugReports.length === 0
+          ? 'No open bug reports.'
+          : `${bugReports.length} open bug report${bugReports.length === 1 ? '' : 's'} copied to clipboard.`
+      );
+    } catch (e) {
+      Alert.alert('Export failed', String(e));
+    }
+  };
+
+  const handleResolveBug = (bug: BugReport) => {
+    Alert.alert('Resolve bug?', 'Mark this report as fixed. It will drop out of the bug export.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Resolve',
+        onPress: async () => {
+          await resolveBugReport(bug.id);
+          loadHabits();
+        },
+      },
+    ]);
   };
 
   useFocusEffect(
@@ -195,6 +232,46 @@ export default function SettingsScreen() {
             </View>
             <FontAwesome name="copy" size={18} color="#888" />
           </TouchableOpacity>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Bug Reports</Text>
+          {bugReports.length === 0 ? (
+            <Text style={styles.bugEmptyText}>
+              No open bugs. Tap the bug icon in any screen's header to report one.
+            </Text>
+          ) : (
+            <>
+              {bugReports.map((bug) => (
+                <View key={bug.id} style={styles.bugRow}>
+                  <View style={styles.bugInfo}>
+                    <Text style={styles.bugText}>{bug.text}</Text>
+                    <Text style={styles.bugMeta}>
+                      {bug.createdAt ? new Date(bug.createdAt).toLocaleString() : ''}
+                      {bug.screen ? ` · ${bug.screen}` : ''}
+                      {bug.appVersion ? ` · v${bug.appVersion}` : ''}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.resolveButton}
+                    onPress={() => handleResolveBug(bug)}
+                    accessibilityLabel="Mark bug resolved"
+                  >
+                    <FontAwesome name="check" size={18} color="#2ecc71" />
+                  </TouchableOpacity>
+                </View>
+              ))}
+              <TouchableOpacity style={styles.exportRow} onPress={handleExportBugs}>
+                <View style={styles.exportInfo}>
+                  <Text style={styles.exportLabel}>Copy open bugs to clipboard</Text>
+                  <Text style={styles.exportHint}>
+                    Readable list for the next dev session — resolved bugs are excluded
+                  </Text>
+                </View>
+                <FontAwesome name="copy" size={18} color="#888" />
+              </TouchableOpacity>
+            </>
+          )}
         </View>
 
         <View style={styles.section}>
@@ -566,6 +643,36 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#888',
     marginTop: 4,
+  },
+  bugRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#16213e',
+    borderRadius: 12,
+    marginBottom: 8,
+    overflow: 'hidden',
+  },
+  bugInfo: {
+    flex: 1,
+    padding: 16,
+  },
+  bugText: {
+    fontSize: 14,
+    color: '#fff',
+    lineHeight: 20,
+  },
+  bugMeta: {
+    fontSize: 12,
+    color: '#666',
+    marginTop: 4,
+  },
+  resolveButton: {
+    padding: 16,
+  },
+  bugEmptyText: {
+    fontSize: 14,
+    color: '#666',
+    lineHeight: 20,
   },
   aboutRow: {
     backgroundColor: '#16213e',
