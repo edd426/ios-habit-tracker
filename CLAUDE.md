@@ -235,4 +235,6 @@ When adding new native-bridge work or new startup logic, preserve these invarian
 
 ## Planned Features
 
-- **"Attempted but unsuccessful" state for habits** - For tracking cases where an attempt was made but did not succeed.
+Open scope lives in `BACKLOG.md` at the repo root, plus GitHub issues where an item has
+one (`gh issue list --repo edd426/ios-habit-tracker`). Check both before starting feature
+work — this file holds environment facts and hard-won gotchas, not the work queue.
