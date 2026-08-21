@@ -18,7 +18,7 @@ import {
   dayOfWeekBuckets,
   medicatedWindowBuckets,
   doseDayPermission,
-  rolling14d,
+  rollingWindow,
   crossHabitOverlap,
   interEventInterval,
   toLocalDateKey,
@@ -31,7 +31,9 @@ import TimeOfDayChart from '@/components/charts/TimeOfDayChart';
 import DayOfWeekChart from '@/components/charts/DayOfWeekChart';
 import MedicatedWindowChart from '@/components/charts/MedicatedWindowChart';
 import DosePermissionChart from '@/components/charts/DosePermissionChart';
-import RollingIntensityChart from '@/components/charts/RollingIntensityChart';
+import RollingWindowChart, {
+  RollingWindowDays,
+} from '@/components/charts/RollingWindowChart';
 import CrossHabitChart from '@/components/charts/CrossHabitChart';
 import IntervalChart from '@/components/charts/IntervalChart';
 
@@ -49,11 +51,20 @@ const TIME_RANGES: { key: TimeRange; label: string; days: number | null }[] = [
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Held fixed across window sizes on purpose: point count is (span - window) /
+ * stride, so a constant stride keeps the x-axis geometry identical when the
+ * window chip changes and the series stay visually comparable. The trade is
+ * that a 7-day window at stride 7 is non-overlapping — plain weekly totals.
+ */
+const ROLLING_STRIDE = 7;
+
 export default function StatsScreen() {
   const [load, setLoad] = useState<StatsLoad | null>(null);
   const [selectedHabitId, setSelectedHabitId] = useState<string | null>(null);
   const [selectedTimeRange, setSelectedTimeRange] = useState<TimeRange>('14d');
   const [compareHabitId, setCompareHabitId] = useState<string | null>(null);
+  const [rollingWindowDays, setRollingWindowDays] = useState<RollingWindowDays>(14);
 
   const refresh = useCallback(async () => {
     try {
@@ -206,15 +217,59 @@ export default function StatsScreen() {
     return doseDayPermission(logs, doseDates, allDateKeys);
   }, [load, selectedHabitId]);
 
-  // Rolling 14-day intensity — use the full habit log history
-  const rolling = useMemo(() => {
-    if (!load || !selectedHabitId) return [];
+  // Rolling window — DELIBERATELY independent of the time-range chip above.
+  // This card is the long-arc trend read; it always plots a source's full
+  // history. The window chip is its only control (range = how much history is
+  // plotted elsewhere, window = the smoothing period here). Only padding: if a
+  // source has less history than the window needs, extend the span backwards
+  // so the card renders instead of going empty, and say so in the subtitle.
+  const rollingSpanFor = useCallback(
+    (firstTs: number | null) => {
+      const endMs = Date.now();
+      const minDays = rollingWindowDays + ROLLING_STRIDE;
+      const earliestAllowed = endMs - (minDays - 1) * DAY_MS;
+      const padded = firstTs === null || firstTs > earliestAllowed;
+      return {
+        startMs: padded ? earliestAllowed : firstTs,
+        endMs,
+        padded,
+      };
+    },
+    [rollingWindowDays]
+  );
+
+  const rollingHabit = useMemo(() => {
+    if (!load || !selectedHabitId) return { windows: [], padded: false };
     const logs = load.logsByHabit.get(selectedHabitId) ?? [];
-    if (logs.length === 0) return [];
-    const firstTs = logs[0].timestamp;
-    const lastTs = Date.now();
-    return rolling14d(logs, firstTs, lastTs);
-  }, [load, selectedHabitId]);
+    if (logs.length === 0) return { windows: [], padded: false };
+    const span = rollingSpanFor(logs[0].timestamp);
+    return {
+      windows: rollingWindow(
+        logs,
+        span.startMs,
+        span.endMs,
+        rollingWindowDays,
+        ROLLING_STRIDE
+      ),
+      padded: span.padded,
+    };
+  }, [load, selectedHabitId, rollingSpanFor, rollingWindowDays]);
+
+  // Doses share the { timestamp } shape, so the same aggregation applies.
+  const rollingDoses = useMemo(() => {
+    if (!load || load.doseLogs.length === 0) return { windows: [], padded: false };
+    const span = rollingSpanFor(load.doseLogs[0].timestamp);
+    return {
+      windows: rollingWindow(
+        load.doseLogs,
+        span.startMs,
+        span.endMs,
+        rollingWindowDays,
+        ROLLING_STRIDE
+      ),
+      padded: span.padded,
+    };
+  }, [load, rollingSpanFor, rollingWindowDays]);
 
   // Cross-habit overlap — over the full activity range
   const overlap = useMemo(() => {
@@ -371,7 +426,14 @@ export default function StatsScreen() {
                 />
               </ChartCard>
 
-              <RollingIntensityChart windows={rolling} color={habitColorRgb} />
+              <RollingWindowChart
+                habitWindows={rollingHabit.windows}
+                doseWindows={rollingDoses.windows}
+                habitColor={habitColorRgb}
+                windowDays={rollingWindowDays}
+                onWindowDaysChange={setRollingWindowDays}
+                spanPadded={rollingHabit.padded}
+              />
 
               <TimeOfDayChart buckets={todBuckets} color={habitColorRgb} />
 

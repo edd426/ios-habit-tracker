@@ -11,6 +11,7 @@ import {
   medicatedWindowBuckets,
   doseDayPermission,
   rolling14d,
+  rollingWindow,
   crossHabitOverlap,
   interEventInterval,
   toLocalDateKey,
@@ -221,6 +222,93 @@ describe('rolling14d', () => {
     expect(first.totalEvents).toBe(10);
     expect(first.highVolumeDays).toBe(2); // both days >= 5 events
     expect(first.eventsPerDay).toBe(5);
+  });
+});
+
+describe('rollingWindow — calendar-day denominator (issue #1)', () => {
+  const byEnd = (ws: ReturnType<typeof rollingWindow>, endDate: string) => {
+    const w = ws.find((x) => x.endDate === endDate);
+    if (!w) throw new Error(`no window ending ${endDate}; got ${ws.map((x) => x.endDate).join(',')}`);
+    return w;
+  };
+
+  /**
+   * The acceptance probe from BACKLOG.md / issue #1.
+   *
+   * Phase A: 3 events EVERY day for 30 days.
+   * Phase B: 3 events EVERY THIRD day for 30 days.
+   *
+   * Intensity is identical in both phases (3 events per active day). Only
+   * frequency changed. The per-active-day series MUST stay flat and the
+   * per-calendar-day series MUST drop — if both are flat, the denominator
+   * change did not land.
+   */
+  it('drops on per-calendar-day while per-active-day stays flat', () => {
+    const start = Date.UTC(2026, 0, 1);
+    const logs: HabitLog[] = [];
+    for (let d = 0; d < 30; d++) {
+      for (let k = 0; k < 3; k++) logs.push(hl('a', start + d * DAY + (10 + k) * HOUR));
+    }
+    for (let d = 30; d < 60; d += 3) {
+      for (let k = 0; k < 3; k++) logs.push(hl('a', start + d * DAY + (10 + k) * HOUR));
+    }
+
+    const ws = rollingWindow(logs, start, start + 59 * DAY, 14, 7);
+
+    // Window covering days 14-27: entirely inside phase A
+    const phaseA = byEnd(ws, toLocalDateKey(start + 27 * DAY));
+    // Window covering days 46-59: entirely inside phase B
+    const phaseB = byEnd(ws, toLocalDateKey(start + 59 * DAY));
+
+    // Intensity: unchanged
+    expect(phaseA.eventsPerDay).toBeCloseTo(3, 5);
+    expect(phaseB.eventsPerDay).toBeCloseTo(3, 5);
+
+    // Frequency: halved or better
+    expect(phaseA.eventsPerCalendarDay).toBeCloseTo(3, 5);
+    expect(phaseB.eventsPerCalendarDay).toBeLessThan(phaseA.eventsPerCalendarDay * 0.5);
+
+    // Active-day rate: 100% -> ~36%
+    expect(phaseA.activeDayRate).toBeCloseTo(100, 5);
+    expect(phaseB.activeDayRate).toBeLessThan(40);
+
+    // Raw totals carry the window size so labels can state it
+    expect(phaseA.windowDays).toBe(14);
+    expect(phaseA.totalEvents).toBe(42);
+  });
+
+  it('honours windowDays for the minimum-range guard', () => {
+    const start = Date.UTC(2026, 0, 1);
+    // 20-day range: enough for a 7- or 14-day window, not for a 30-day one
+    expect(rollingWindow([hl('a', start)], start, start + 19 * DAY, 7).length).toBeGreaterThan(0);
+    expect(rollingWindow([hl('a', start)], start, start + 19 * DAY, 14).length).toBeGreaterThan(0);
+    expect(rollingWindow([hl('a', start)], start, start + 19 * DAY, 30)).toEqual([]);
+  });
+
+  it('always emits a window ending on the last day of the range', () => {
+    const start = Date.UTC(2026, 0, 1);
+    // 30 days: strided ends land on 13, 20, 27 — day 29 would otherwise be invisible
+    const ws = rollingWindow([hl('a', start + 28 * DAY)], start, start + 29 * DAY, 14, 7);
+    expect(ws[ws.length - 1].endDate).toBe(toLocalDateKey(start + 29 * DAY));
+    // and the tail window is not a duplicate of the previous one
+    expect(ws.filter((w) => w.endDate === toLocalDateKey(start + 29 * DAY))).toHaveLength(1);
+  });
+
+  it('accepts any { timestamp } shape, not just HabitLog', () => {
+    const start = Date.UTC(2026, 0, 1);
+    const doses: DoseLog[] = [];
+    for (let d = 0; d < 20; d++) doses.push(dl(start + d * DAY + 12 * HOUR, 'slow'));
+    const ws = rollingWindow(doses, start, start + 19 * DAY, 14, 7);
+    expect(ws.length).toBeGreaterThan(0);
+    expect(ws[0].eventsPerCalendarDay).toBeCloseTo(1, 5);
+  });
+
+  it('rolling14d stays a 14-day alias so existing call sites do not regress', () => {
+    const start = Date.UTC(2026, 0, 1);
+    const logs = [hl('a', start + 3 * DAY), hl('a', start + 9 * DAY)];
+    expect(rolling14d(logs, start, start + 27 * DAY, 7)).toEqual(
+      rollingWindow(logs, start, start + 27 * DAY, 14, 7)
+    );
   });
 });
 

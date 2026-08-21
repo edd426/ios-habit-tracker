@@ -49,12 +49,29 @@ export interface DosePermission {
   ratio: number;             // onDoseRate / offDoseRate (Infinity if off=0)
 }
 
+/** Anything carrying a timestamp: HabitLog, DoseLog, or a synthetic event. */
+export interface TimestampedEvent {
+  timestamp: number;
+}
+
 export interface RollingWindow {
-  endDate: string;           // 'YYYY-MM-DD'
-  activeDays: number;         // unique event-days in window
-  totalEvents: number;       // raw count
-  eventsPerDay: number;      // totalEvents / activeDays (0 if no days)
-  highVolumeDays: number;    // days with >= 5 events
+  endDate: string;              // 'YYYY-MM-DD'
+  windowDays: number;           // width of this window, so labels can state it
+  activeDays: number;           // unique event-days in window
+  totalEvents: number;          // raw count
+  /**
+   * INTENSITY: totalEvents / activeDays (0 if no active days). Conditioned on
+   * the habit having happened at all, so it deliberately says nothing about
+   * how often that was.
+   */
+  eventsPerDay: number;
+  /**
+   * FREQUENCY: totalEvents / windowDays. Zero-days count against the average,
+   * which is what makes a drop in how *often* something happens visible.
+   */
+  eventsPerCalendarDay: number;
+  activeDayRate: number;        // activeDays / windowDays, as 0-100 percent
+  highVolumeDays: number;       // days with >= HIGH_VOLUME_THRESHOLD events
 }
 
 export interface OverlapSegments {
@@ -152,11 +169,15 @@ export function toLocalDayStart(ts: number): number {
 /** All YYYY-MM-DD keys from start (inclusive) to end (inclusive). */
 export function enumerateDates(startMs: number, endMs: number): string[] {
   const out: string[] = [];
-  let cur = toLocalDayStart(startMs);
+  // Step by calendar date rather than by +24h: on a DST fall-back the day is
+  // 25 hours long, so a fixed 24h step emits the same date twice and shifts
+  // every subsequent window off by a day.
+  const cur = new Date(toLocalDayStart(startMs));
   const last = toLocalDayStart(endMs);
-  while (cur <= last) {
-    out.push(toLocalDateKey(cur));
-    cur += 24 * 60 * 60 * 1000;
+  while (cur.getTime() <= last) {
+    out.push(toLocalDateKey(cur.getTime()));
+    cur.setDate(cur.getDate() + 1);
+    cur.setHours(0, 0, 0, 0);
   }
   return out;
 }
@@ -323,33 +344,52 @@ export function doseDayPermission(
 }
 
 // ============================================================================
-// Rolling 14-day window
+// Rolling window
 // ============================================================================
 
 const HIGH_VOLUME_THRESHOLD = 5;
 
-export function rolling14d(
-  logs: HabitLog[],
+/**
+ * Trailing-window aggregation over any timestamped events.
+ *
+ * Emits one window every `stride` days, each covering the preceding
+ * `windowDays` calendar days. Both an intensity reading (`eventsPerDay`,
+ * denominated in ACTIVE days) and a frequency reading (`eventsPerCalendarDay`,
+ * `activeDayRate`, denominated in ELAPSED days) come back on every window —
+ * they answer different questions and diverge exactly when engagement gets
+ * rarer without getting smaller.
+ *
+ * `stride` is held at 7 by callers regardless of window size, so switching
+ * window width keeps the x-axis geometry identical and the series stay
+ * visually comparable. A 7-day window at stride 7 is therefore
+ * non-overlapping — i.e. plain weekly totals, which is a legible read rather
+ * than a degenerate one.
+ */
+export function rollingWindow(
+  events: TimestampedEvent[],
   startMs: number,
   endMs: number,
+  windowDays: number = 14,
   stride: number = 7
 ): RollingWindow[] {
-  // Index events by date
+  if (!Number.isFinite(windowDays) || windowDays < 1) return [];
+  const width = Math.floor(windowDays);
+  const step = Math.max(1, Math.floor(stride));
+
   const eventsByDate = new Map<string, number>();
-  for (const log of logs) {
-    const key = toLocalDateKey(log.timestamp);
+  for (const e of events) {
+    const key = toLocalDateKey(e.timestamp);
     eventsByDate.set(key, (eventsByDate.get(key) ?? 0) + 1);
   }
 
   const allDates = enumerateDates(startMs, endMs);
-  if (allDates.length < 14) return [];
+  if (allDates.length < width) return [];
 
-  const out: RollingWindow[] = [];
-  for (let i = 13; i < allDates.length; i += stride) {
+  const windowEndingAt = (i: number): RollingWindow => {
     let activeDays = 0;
     let totalEvents = 0;
     let highVolumeDays = 0;
-    for (let j = i - 13; j <= i; j++) {
+    for (let j = i - width + 1; j <= i; j++) {
       const c = eventsByDate.get(allDates[j]) ?? 0;
       if (c > 0) {
         activeDays++;
@@ -357,15 +397,38 @@ export function rolling14d(
         if (c >= HIGH_VOLUME_THRESHOLD) highVolumeDays++;
       }
     }
-    out.push({
+    return {
       endDate: allDates[i],
+      windowDays: width,
       activeDays,
       totalEvents,
       eventsPerDay: activeDays > 0 ? totalEvents / activeDays : 0,
+      eventsPerCalendarDay: totalEvents / width,
+      activeDayRate: (activeDays / width) * 100,
       highVolumeDays,
-    });
-  }
+    };
+  };
+
+  const lastIdx = allDates.length - 1;
+  const out: RollingWindow[] = [];
+  for (let i = width - 1; i <= lastIdx; i += step) out.push(windowEndingAt(i));
+
+  // Strided ends rarely land on the final day. Without this the most recent
+  // (stride - 1) days never reach the chart's right edge — i.e. the part of
+  // the series you actually look at to judge "am I improving lately".
+  if (out[out.length - 1].endDate !== allDates[lastIdx]) out.push(windowEndingAt(lastIdx));
+
   return out;
+}
+
+/** 14-day call site, kept so pre-existing charts and tests do not regress. */
+export function rolling14d(
+  logs: TimestampedEvent[],
+  startMs: number,
+  endMs: number,
+  stride: number = 7
+): RollingWindow[] {
+  return rollingWindow(logs, startMs, endMs, 14, stride);
 }
 
 // ============================================================================
