@@ -12,7 +12,7 @@
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
     "@react-native-async-storage/async-storage": "2.2.0",
-    "@react-native-community/datetimepicker": "8.4.4",
+    "@react-native-community/datetimepicker": "8.5.1",
     "@react-navigation/native": "^7.1.8",
     "expo": "~54.0.32",
     "expo-clipboard": "~8.0.8",
@@ -39,6 +39,13 @@
     "jest-expo": "^55.0.17",
     "react-test-renderer": "19.1.0",
     "typescript": "~5.9.2"
+  },
+  "expo": {
+    "install": {
+      "exclude": [
+        "@react-native-community/datetimepicker"
+      ]
+    }
   },
   "private": true
 }

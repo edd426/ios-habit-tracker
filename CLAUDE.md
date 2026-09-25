@@ -212,6 +212,10 @@ interface DoseLog {
 
 6. **iCloud KV 1 MB ceiling**: NSUbiquitousKeyValueStore caps ALL keys at 1 MB total, and `set()` past the cap fails SILENTLY — sync stops propagating while the UI still reports success. Settings shows the current sync payload size (`getSyncDataSize()` in `lib/storage.ts`); if it approaches the limit, old logs need to be archived out of the sync set (or the sync layer moved to file-based iCloud storage)
 
+7. **Date/time pickers: the "snaps back to 1:00 AM" bug.** Root cause, found after three fixes aimed at the wrong layer: under the New Architecture, `@react-native-community/datetimepicker` 8.4.4 (what Expo SDK 54 pins) recycles its native view and diffs new props against the *previous owner's* props. An absent `maximumDate` reaches native as `0`, which 8.4.4 applies as `maximumDate = epoch` (1970-01-01 01:00 Budapest). Any picker with no max, opened after one that had a max, clamped to 1:00 AM and snapped back on every spin until an app restart emptied the recycle pool. Two fixes, keep both:
+   - The library is pinned at **8.5.1** (disables recycling, maps 0 to `nil`). Expo SDK 54 expects 8.4.4, so the package is listed in `expo.install.exclude` in `package.json`. Do not let `expo install --fix` downgrade it; `components/__tests__/PickerSheet.test.tsx` fails if it does.
+   - `PickerSheet` always sends a concrete `maximumDate` (`NO_MAX_DATE` when the caller has none). Render every date/time picker through `PickerSheet`, never `DateTimePicker` directly.
+
 ## Startup Reliability Invariants
 
 The app must launch reliably — it's the user's source of truth for medication doses. Several invariants protect against the New Architecture's "TurboModuleManager: Timed out waiting for modules to be invalidated" crash, which fires when iOS can't get a response from the JS thread within ~10s during teardown:
