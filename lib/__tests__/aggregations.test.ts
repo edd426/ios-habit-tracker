@@ -15,6 +15,15 @@ import {
   crossHabitOverlap,
   interEventInterval,
   toLocalDateKey,
+  gapsBetweenActiveDays,
+  gapHistogram,
+  gapHistogramHalves,
+  longestGapSteps,
+  currentGapDays,
+  dailyCountSeries,
+  heatmapCap,
+  heatLevel,
+  heatmapGrid,
 } from '../aggregations';
 import { HabitLog, DoseLog } from '../types';
 
@@ -362,5 +371,186 @@ describe('toLocalDateKey', () => {
   it('two-digit months are not double-padded', () => {
     const ts = new Date(2026, 10, 15, 10, 0).getTime();
     expect(toLocalDateKey(ts)).toBe('2026-11-15');
+  });
+});
+
+// Local-time helpers: build fixtures from calendar days so the tests hold in
+// any TZ, including across a DST change.
+const at = (y: number, m: number, d: number, h = 10) => new Date(y, m, d, h).getTime();
+function eventsOnDays(dayOffsets: number[], y = 2026, m = 0, d = 1) {
+  return dayOffsets.map((off) => ({ timestamp: at(y, m, d + off) }));
+}
+/** Active-day offsets that realise exactly the given gap sequence. */
+function daysFromGaps(gaps: number[]): number[] {
+  const out = [0];
+  for (const g of gaps) out.push(out[out.length - 1] + g);
+  return out;
+}
+
+describe('gapsBetweenActiveDays (issue #3)', () => {
+  it('measures days between consecutive ACTIVE days, deduping same-day events', () => {
+    const events = [
+      ...eventsOnDays([0, 1, 1, 1, 4, 10]),
+      { timestamp: at(2026, 0, 2, 23) }, // late on day 1 again: still one active day
+    ];
+    expect(gapsBetweenActiveDays(events)).toEqual([1, 3, 6]);
+  });
+
+  it('never produces zero-length gaps', () => {
+    const sameDay = [at(2026, 0, 1, 8), at(2026, 0, 1, 12), at(2026, 0, 1, 20)].map((t) => ({
+      timestamp: t,
+    }));
+    expect(gapsBetweenActiveDays(sameDay)).toEqual([]);
+  });
+
+  it('counts calendar days across a DST change (23h / 25h days)', () => {
+    // Spans both EU switches in 2026 (Mar 29, Oct 25).
+    const events = [at(2026, 2, 28, 12), at(2026, 2, 30, 0), at(2026, 9, 24, 23), at(2026, 9, 26, 1)].map(
+      (t) => ({ timestamp: t })
+    );
+    expect(gapsBetweenActiveDays(events)).toEqual([2, 208, 2]);
+  });
+});
+
+describe('gap histogram halves — acceptance probe (issue #3)', () => {
+  const firstHalf = [1, 1, 1, 1, 2, 1, 1];
+  const secondHalf = [1, 5, 1, 9, 1, 12];
+  const events = eventsOnDays(daysFromGaps([...firstHalf, ...secondHalf]));
+
+  it('round-trips the probe gaps through the shared primitive', () => {
+    expect(gapsBetweenActiveDays(events)).toEqual([...firstHalf, ...secondHalf]);
+  });
+
+  it('shows a visibly heavier right tail in the newer half', () => {
+    const h = gapHistogramHalves(gapsBetweenActiveDays(events));
+    // buckets:            1  2  3  4-7  8-14  15+
+    expect(h.first).toEqual([6, 1, 0, 0, 0, 0]);
+    expect(h.second).toEqual([3, 0, 0, 1, 2, 0]);
+    expect(h.firstTotal).toBe(7);
+    expect(h.secondTotal).toBe(6);
+  });
+
+  it('while the rolling median alone barely separates the halves', () => {
+    const median = (xs: number[]) => {
+      const s = [...xs].sort((a, b) => a - b);
+      return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
+    };
+    expect(median(firstHalf)).toBe(1);
+    expect(median(secondHalf)).toBe(3); // 1,1,1,5,9,12 — tail invisible beyond "3"
+  });
+
+  it('puts gaps into the documented buckets, with 15+ open-ended', () => {
+    expect(gapHistogram([1, 2, 3, 4, 7, 8, 14, 15, 400])).toEqual([1, 1, 1, 2, 2, 2]);
+    expect(gapHistogram([0, -1, NaN])).toEqual([0, 0, 0, 0, 0, 0]);
+  });
+});
+
+describe('longestGapSteps (issue #3)', () => {
+  it('is a non-decreasing record series that steps up at 5, 9, 12 in the probe tail', () => {
+    const gaps = [1, 1, 1, 1, 2, 1, 1, 1, 5, 1, 9, 1, 12];
+    const steps = longestGapSteps(eventsOnDays(daysFromGaps(gaps)));
+    // NOTE: the issue text says "exactly three upward steps (5, 9, 12)", but its
+    // own first half contains a 2, which beats the opening 1. Over the full
+    // history the records are 1 -> 2 -> 5 -> 9 -> 12; the three steps it names
+    // are exactly the ones in the newer half.
+    expect(steps.map((s) => s.longest)).toEqual([1, 2, 5, 9, 12]);
+    for (let i = 1; i < steps.length; i++) expect(steps[i].longest).toBeGreaterThan(steps[i - 1].longest);
+    // Each record is dated on the active day that closed it.
+    const days = daysFromGaps(gaps);
+    expect(steps[steps.length - 1].date).toBe(toLocalDateKey(at(2026, 0, 1 + days[days.length - 1])));
+  });
+
+  it('returns nothing without at least two active days', () => {
+    expect(longestGapSteps([])).toEqual([]);
+    expect(longestGapSteps(eventsOnDays([0, 0]))).toEqual([]);
+  });
+});
+
+describe('currentGapDays', () => {
+  it('counts days since the last active day', () => {
+    const events = eventsOnDays([0, 3]);
+    expect(currentGapDays(events, at(2026, 0, 4, 22))).toBe(0);
+    expect(currentGapDays(events, at(2026, 0, 10, 1))).toBe(6);
+    expect(currentGapDays([], at(2026, 0, 10))).toBeNull();
+  });
+});
+
+describe('dailyCountSeries (issue #2)', () => {
+  it('emits every calendar day, zero-days included', () => {
+    const series = dailyCountSeries(eventsOnDays([0, 0, 2]), at(2026, 0, 1), at(2026, 0, 4));
+    expect(series).toEqual([
+      { date: '2026-01-01', count: 2 },
+      { date: '2026-01-02', count: 0 },
+      { date: '2026-01-03', count: 1 },
+      { date: '2026-01-04', count: 0 },
+    ]);
+  });
+
+  it('has no duplicate or missing dates across a DST fall-back', () => {
+    const series = dailyCountSeries([], at(2026, 9, 20), at(2026, 9, 30));
+    expect(series.map((d) => d.date)).toEqual(
+      Array.from({ length: 11 }, (_, i) => `2026-10-${String(20 + i).padStart(2, '0')}`)
+    );
+  });
+});
+
+describe('heatmap color scale (issue #2)', () => {
+  it('caps at the 90th percentile of active days so one outlier cannot flatten the rest', () => {
+    const counts = [0, 0, ...Array(18).fill(2), 3, 40];
+    expect(heatmapCap(counts)).toBe(2);
+    // typical days get the darkest shade instead of being washed out by the 40
+    expect(heatLevel(2, 2)).toBe(4);
+    expect(heatLevel(40, 2)).toBe(4);
+  });
+
+  it('keeps any activity visibly distinct from none', () => {
+    expect(heatmapCap([0, 0, 0])).toBe(0);
+    expect(heatLevel(0, 10)).toBe(0);
+    expect(heatLevel(1, 10)).toBe(1);
+    expect(heatLevel(5, 10)).toBe(2);
+    expect(heatLevel(10, 10)).toBe(4);
+  });
+});
+
+describe('heatmapGrid (issue #2)', () => {
+  it('acceptance probe: a 21-day run next to a 21-day gap renders solid vs empty', () => {
+    // Sun 2026-02-01 .. Sat 2026-03-14: 21 active days, then 21 days of nothing.
+    const events = Array.from({ length: 21 }, (_, i) => [
+      { timestamp: at(2026, 1, 1 + i, 9) },
+      { timestamp: at(2026, 1, 1 + i, 18) },
+    ]).flat();
+    const grid = heatmapGrid(events, 10, at(2026, 2, 14, 12));
+    const cells = grid.weeks.flat().filter((c): c is NonNullable<typeof c> => c !== null);
+    const run = cells.filter((c) => c.date >= '2026-02-01' && c.date <= '2026-02-21');
+    const gap = cells.filter((c) => c.date >= '2026-02-22' && c.date <= '2026-03-14');
+    expect(run).toHaveLength(21);
+    expect(gap).toHaveLength(21);
+    expect(run.every((c) => c.level === 4)).toBe(true);
+    expect(gap.every((c) => c.level === 0)).toBe(true);
+    expect(grid.activeDays).toBe(21);
+  });
+
+  it('lays out Monday-first week columns ending with the current week', () => {
+    // Fri 2026-09-25
+    const grid = heatmapGrid([], 26, at(2026, 8, 25, 15));
+    expect(grid.weeks).toHaveLength(26);
+    grid.weeks.forEach((col) => expect(col).toHaveLength(7));
+    expect(grid.weeks[0][0]?.date).toBe('2026-03-30'); // a Monday, 25 weeks back
+    const last = grid.weeks[25];
+    expect(last[0]?.date).toBe('2026-09-21'); // Monday
+    expect(last[4]?.date).toBe('2026-09-25'); // today, Friday
+    expect(last[5]).toBeNull(); // future days stay empty
+    expect(last[6]).toBeNull();
+  });
+
+  it('labels months at the column holding their 1st, without collisions', () => {
+    const grid = heatmapGrid([], 26, at(2026, 8, 25, 15));
+    const labels = grid.monthLabels.map((m) => m.label);
+    expect(labels).toEqual(['Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep']);
+    for (let i = 1; i < grid.monthLabels.length; i++) {
+      expect(grid.monthLabels[i].week - grid.monthLabels[i - 1].week).toBeGreaterThanOrEqual(3);
+    }
+    // Apr 1 2026 is a Wednesday in the first column
+    expect(grid.monthLabels[0].week).toBe(0);
   });
 });

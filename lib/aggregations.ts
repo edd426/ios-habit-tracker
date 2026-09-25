@@ -469,53 +469,272 @@ export function crossHabitOverlap(
 }
 
 // ============================================================================
-// Inter-event interval
+// Gaps between active days (one definition, three readings)
 // ============================================================================
+
+const DAY_MS_AGG = 24 * 60 * 60 * 1000;
+
+/**
+ * Local calendar day as an integer day count. Built from the LOCAL y/m/d, so
+ * it is immune to DST (a 23h or 25h day is still exactly one day apart).
+ */
+export function localDayNumber(ts: number): number {
+  const d = new Date(ts);
+  return Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / DAY_MS_AGG);
+}
+
+/** Inverse of localDayNumber: day count -> 'YYYY-MM-DD'. */
+export function dayNumberToKey(day: number): string {
+  return new Date(day * DAY_MS_AGG).toISOString().slice(0, 10);
+}
+
+/** 'YYYY-MM-DD' -> day count, on the same scale as localDayNumber. */
+export function dateKeyToDayNumber(key: string): number {
+  return Math.round(Date.UTC(+key.slice(0, 4), +key.slice(5, 7) - 1, +key.slice(8, 10)) / DAY_MS_AGG);
+}
+
+/**
+ * Sorted unique day numbers with at least one event. Two events on the same
+ * day are ONE active day, which dedupes multi-tap retro entries.
+ */
+export function activeDayNumbers(events: TimestampedEvent[]): number[] {
+  return Array.from(new Set(events.map((e) => localDayNumber(e.timestamp)))).sort((a, b) => a - b);
+}
+
+function consecutiveDiffs(days: number[]): number[] {
+  const out: number[] = [];
+  for (let i = 1; i < days.length; i++) out.push(days[i] - days[i - 1]);
+  return out;
+}
+
+/**
+ * THE definition of a gap, shared by the rolling median, the gap histogram
+ * and the longest-gap step chart: days between consecutive ACTIVE days, in
+ * chronological order. Consecutive days are a gap of 1; a gap of n means
+ * n - 1 days without an event in between. Never 0, since active days are
+ * deduped first.
+ */
+export function gapsBetweenActiveDays(events: TimestampedEvent[]): number[] {
+  return consecutiveDiffs(activeDayNumbers(events));
+}
 
 /**
  * Rolling median days-between-events over the trailing windowDays. Useful as
  * a trend signal: if the median rises over time, events are spreading out.
+ * A median is blind to the tail by construction; see gapHistogramHalves and
+ * longestGapSteps for that.
  */
 export function interEventInterval(
-  logs: HabitLog[],
+  events: TimestampedEvent[],
   windowDays: number = 30,
   stride: number = 7
 ): IntervalPoint[] {
-  if (logs.length < 2) return [];
+  const days = activeDayNumbers(events);
+  if (days.length < 2) return [];
 
-  // Use unique event-days to dedupe multi-tap retro entries
-  const uniqueDays = Array.from(new Set(logs.map((l) => toLocalDateKey(l.timestamp)))).sort();
-  if (uniqueDays.length < 2) return [];
-
-  const firstMs = new Date(uniqueDays[0]).getTime();
-  const lastMs = new Date(uniqueDays[uniqueDays.length - 1]).getTime();
-
+  const first = days[0];
+  const last = days[days.length - 1];
   const out: IntervalPoint[] = [];
-  const windowMs = windowDays * 24 * 60 * 60 * 1000;
-  const strideMs = stride * 24 * 60 * 60 * 1000;
 
-  for (let endMs = firstMs + windowMs; endMs <= lastMs + strideMs; endMs += strideMs) {
-    const startMs = endMs - windowMs;
-    const windowDayKeys = uniqueDays.filter((d) => {
-      const t = new Date(d).getTime();
-      return t >= startMs && t <= endMs;
-    });
-    if (windowDayKeys.length < 2) {
-      out.push({ endDate: toLocalDateKey(endMs), medianGapDays: null });
+  for (let endDay = first + windowDays; endDay <= last + stride; endDay += stride) {
+    const startDay = endDay - windowDays;
+    const gaps = consecutiveDiffs(days.filter((d) => d >= startDay && d <= endDay));
+    if (gaps.length === 0) {
+      out.push({ endDate: dayNumberToKey(endDay), medianGapDays: null });
       continue;
-    }
-    const gaps: number[] = [];
-    for (let i = 1; i < windowDayKeys.length; i++) {
-      const prev = new Date(windowDayKeys[i - 1]).getTime();
-      const cur = new Date(windowDayKeys[i]).getTime();
-      gaps.push((cur - prev) / (24 * 60 * 60 * 1000));
     }
     gaps.sort((a, b) => a - b);
     const median =
       gaps.length % 2 === 0
         ? (gaps[gaps.length / 2 - 1] + gaps[gaps.length / 2]) / 2
         : gaps[(gaps.length - 1) / 2];
-    out.push({ endDate: toLocalDateKey(endMs), medianGapDays: median });
+    out.push({ endDate: dayNumberToKey(endDay), medianGapDays: median });
   }
   return out;
+}
+
+/** Histogram buckets for gap lengths. 15+ is open-ended so the tail stays compact. */
+export const GAP_BUCKETS: { label: string; min: number; max: number }[] = [
+  { label: '1', min: 1, max: 1 },
+  { label: '2', min: 2, max: 2 },
+  { label: '3', min: 3, max: 3 },
+  { label: '4–7', min: 4, max: 7 },
+  { label: '8–14', min: 8, max: 14 },
+  { label: '15+', min: 15, max: Infinity },
+];
+
+/** Count gaps into GAP_BUCKETS. Anything < 1 is not a gap and is dropped. */
+export function gapHistogram(gaps: number[]): number[] {
+  const counts = GAP_BUCKETS.map(() => 0);
+  for (const g of gaps) {
+    if (!(g >= 1)) continue;
+    const i = GAP_BUCKETS.findIndex((b) => g >= b.min && g <= b.max);
+    if (i >= 0) counts[i]++;
+  }
+  return counts;
+}
+
+export interface GapHalves {
+  first: number[];      // bucket counts, older half of the gaps
+  second: number[];     // bucket counts, newer half
+  firstTotal: number;
+  secondTotal: number;
+}
+
+/**
+ * Split the FULL gap history in half by gap count (older half gets the odd
+ * one) and bucket each half. Equal sample sizes make the two distributions
+ * directly comparable, so a fattening right tail shows up as a shift into the
+ * wide buckets even when the median barely moves.
+ */
+export function gapHistogramHalves(gaps: number[]): GapHalves {
+  const mid = Math.ceil(gaps.length / 2);
+  const olderHalf = gaps.slice(0, mid);
+  const newerHalf = gaps.slice(mid);
+  return {
+    first: gapHistogram(olderHalf),
+    second: gapHistogram(newerHalf),
+    firstTotal: olderHalf.length,
+    secondTotal: newerHalf.length,
+  };
+}
+
+export interface GapRecord {
+  date: string;     // the active day that closed the record gap
+  longest: number;  // longest gap seen up to and including this date
+}
+
+/**
+ * Running "longest gap so far", reduced to the points where it changes: the
+ * first gap sets the opening level and every later gap that beats all earlier
+ * ones is a step up. Non-decreasing by construction. Pass the FULL history, or
+ * the record silently resets whenever the caller's window moves.
+ */
+export function longestGapSteps(events: TimestampedEvent[]): GapRecord[] {
+  const days = activeDayNumbers(events);
+  const out: GapRecord[] = [];
+  let best = 0;
+  for (let i = 1; i < days.length; i++) {
+    const gap = days[i] - days[i - 1];
+    if (gap > best) {
+      best = gap;
+      out.push({ date: dayNumberToKey(days[i]), longest: gap });
+    }
+  }
+  return out;
+}
+
+/** Days from the last active day to `nowMs`'s day (0 = active today, null = never active). */
+export function currentGapDays(events: TimestampedEvent[], nowMs: number = Date.now()): number | null {
+  const days = activeDayNumbers(events);
+  if (days.length === 0) return null;
+  return Math.max(0, localDayNumber(nowMs) - days[days.length - 1]);
+}
+
+// ============================================================================
+// Calendar heatmap
+// ============================================================================
+
+export interface DailyCount {
+  date: string;   // 'YYYY-MM-DD'
+  count: number;
+}
+
+/** One entry per calendar day from start to end (inclusive), zero-days included. */
+export function dailyCountSeries(
+  events: TimestampedEvent[],
+  startMs: number,
+  endMs: number
+): DailyCount[] {
+  const byDate = new Map<string, number>();
+  for (const e of events) {
+    const key = toLocalDateKey(e.timestamp);
+    byDate.set(key, (byDate.get(key) ?? 0) + 1);
+  }
+  return enumerateDates(startMs, endMs).map((date) => ({ date, count: byDate.get(date) ?? 0 }));
+}
+
+/**
+ * Color-scale ceiling: the 90th percentile (nearest rank) of the non-zero
+ * daily counts. Days at or above it get the darkest shade, so one outlier day
+ * can't flatten every typical day into the same pale shade. 0 = no activity.
+ */
+export function heatmapCap(counts: number[]): number {
+  const active = counts.filter((c) => c > 0).sort((a, b) => a - b);
+  if (active.length === 0) return 0;
+  return active[Math.ceil(0.9 * active.length) - 1];
+}
+
+export type HeatLevel = 0 | 1 | 2 | 3 | 4;
+
+/** 0 = no events; 1..4 = quartiles of the capped scale. Any activity is >= 1. */
+export function heatLevel(count: number, cap: number): HeatLevel {
+  if (count <= 0 || cap <= 0) return 0;
+  return Math.max(1, Math.min(4, Math.ceil((Math.min(count, cap) / cap) * 4))) as HeatLevel;
+}
+
+export interface HeatCell extends DailyCount {
+  level: HeatLevel;
+}
+
+export interface HeatmapGrid {
+  /** Week columns, oldest first; each has 7 rows Mon..Sun. null = a future day this week. */
+  weeks: (HeatCell | null)[][];
+  /** Month name at the column containing that month's 1st, thinned so labels don't collide. */
+  monthLabels: { week: number; label: string }[];
+  cap: number;
+  activeDays: number;
+}
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * GitHub-style grid: `weekCount` Monday-first week columns ending with the
+ * week containing `endMs`. Days after `endMs` in the final week are null.
+ */
+export function heatmapGrid(
+  events: TimestampedEvent[],
+  weekCount: number,
+  endMs: number = Date.now()
+): HeatmapGrid {
+  const weeksN = Math.max(1, Math.floor(weekCount));
+  const start = new Date(toLocalDayStart(endMs));
+  const mondayIndex = (start.getDay() + 6) % 7;
+  // Calendar arithmetic (setDate), not ms offsets, so DST can't shift the grid.
+  start.setDate(start.getDate() - mondayIndex - (weeksN - 1) * 7);
+
+  const series = dailyCountSeries(events, start.getTime(), endMs);
+  const cap = heatmapCap(series.map((d) => d.count));
+
+  const weeks: (HeatCell | null)[][] = [];
+  for (let w = 0; w < weeksN; w++) {
+    const col: (HeatCell | null)[] = [];
+    for (let r = 0; r < 7; r++) {
+      const d = series[w * 7 + r];
+      col.push(d ? { ...d, level: heatLevel(d.count, cap) } : null);
+    }
+    weeks.push(col);
+  }
+
+  const MIN_LABEL_GAP = 3; // columns; a 3-letter month label is ~3 cells wide
+  const monthLabels: { week: number; label: string }[] = [];
+  weeks.forEach((col, w) => {
+    const firstOfMonth = col.find((c) => c && c.date.endsWith('-01'));
+    const cell = firstOfMonth ?? (w === 0 ? col[0] : null);
+    if (!cell) return;
+    const prev = monthLabels[monthLabels.length - 1];
+    if (prev && w - prev.week < MIN_LABEL_GAP) {
+      // A real month start beats the leading partial-month label.
+      if (prev.week === 0 && firstOfMonth) monthLabels.pop();
+      else return;
+    }
+    monthLabels.push({ week: w, label: MONTH_ABBR[Number(cell.date.slice(5, 7)) - 1] });
+  });
+
+  return {
+    weeks,
+    monthLabels,
+    cap,
+    activeDays: series.filter((d) => d.count > 0).length,
+  };
 }

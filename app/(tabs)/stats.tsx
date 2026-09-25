@@ -36,6 +36,8 @@ import RollingWindowChart, {
 } from '@/components/charts/RollingWindowChart';
 import CrossHabitChart from '@/components/charts/CrossHabitChart';
 import IntervalChart from '@/components/charts/IntervalChart';
+import CalendarHeatmap from '@/components/charts/CalendarHeatmap';
+import GapChart from '@/components/charts/GapChart';
 
 const screenWidth = Dimensions.get('window').width;
 
@@ -115,6 +117,13 @@ export default function StatsScreen() {
     }
     return range?.days ?? 14;
   }, [load, selectedHabitId, selectedTimeRange]);
+
+  // Full history for the selected habit. The calendar and gap cards read this,
+  // not the range-filtered set: they are long-span views like the rolling card.
+  const selectedHabitLogs: HabitLog[] = useMemo(
+    () => (load && selectedHabitId ? load.logsByHabit.get(selectedHabitId) ?? [] : []),
+    [load, selectedHabitId]
+  );
 
   // Range-filtered habit logs for the selected habit
   const rangeHabitLogs: HabitLog[] = useMemo(() => {
@@ -426,6 +435,12 @@ export default function StatsScreen() {
                 />
               </ChartCard>
 
+              <CalendarHeatmap
+                habitEvents={selectedHabitLogs}
+                doseEvents={load.doseLogs}
+                habitColor={habitColorRgb}
+              />
+
               <RollingWindowChart
                 habitWindows={rollingHabit.windows}
                 doseWindows={rollingDoses.windows}
@@ -452,6 +467,13 @@ export default function StatsScreen() {
               />
 
               <IntervalChart points={intervalPoints} color={habitColorRgb} />
+
+              <GapChart
+                habitEvents={selectedHabitLogs}
+                doseEvents={load.doseLogs}
+                habitColor={habitColorRgb}
+                habitType={selectedHabit.type}
+              />
 
               {/* Summary (existing) */}
               <View style={styles.statsCard}>
