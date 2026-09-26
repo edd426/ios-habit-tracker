@@ -115,6 +115,37 @@ xcrun xctrace list devices    # find "Evan DeLord's iPhone (...)" → UDID is in
 npx expo run:ios --device 00008110-001E1D8114F3801E --configuration Release
 ```
 
+### Installing over Wi-Fi (no cable needed)
+
+The iPhone is paired with this Mac for wireless debugging, so the Release build above
+installs over the local network. **Default to this; don't ask Evan to find a cable.**
+Preconditions: phone unlocked, phone and Mac on the same Wi-Fi. Check reachability first:
+
+```bash
+xcrun devicectl list devices --verbose | grep -E "transportType|tunnelState|pairingState"
+# want: transportType localNetwork, pairingState paired
+xcrun devicectl device info details --device 676B845C-62CA-52B1-A6DA-1FACF77CAC01 --timeout 45
+# want: tunnelState connected. The "developer disk image could not be mounted" error
+# usually means the phone is locked — unlock and retry.
+```
+
+Note the two IDs: `xctrace`/`expo run:ios` use the UDID (`00008110-…`), while `devicectl`
+uses the CoreDevice identifier (`676B845C-…`). `devicectl list devices` shows "unavailable"
+when the phone is asleep or off the Wi-Fi; that's not a pairing loss. If pairing is ever
+lost, plug in once, open Xcode → Window → Devices and Simulators, and tick
+"Connect via network".
+
+**If `expo run:ios` hangs at `Connecting to: Evan DeLord's iPhone` after `Build Succeeded`**
+(seen 2026-09-26 over Wi-Fi: the tunnel dropped mid-install and expo never timed out), the
+`.app` is already built. Kill expo and install it directly, which worked first try:
+
+```bash
+pkill -f "expo run:ios"
+APP=$(ls -d ~/Library/Developer/Xcode/DerivedData/HabitTracker-*/Build/Products/Release-iphoneos/HabitTracker.app)
+xcrun devicectl device install app --device 676B845C-62CA-52B1-A6DA-1FACF77CAC01 --timeout 120 "$APP"
+xcrun devicectl device process launch --device 676B845C-62CA-52B1-A6DA-1FACF77CAC01 com.evdelord.habittracker
+```
+
 ### Reading the build output
 
 A successful Release install ends with:
