@@ -81,3 +81,25 @@ attempt was made but didn't succeed — relevant to understanding patterns aroun
 medication timing and side effects. Needs a data-model decision: a third log state on
 `HabitLog` versus a separate log type, with a migration either way (see
 `lib/migrations.ts`).
+
+---
+
+## Fully cloud-based build and install (no local Mac in the loop)
+
+**Problem.** The current pipeline is cloud-plus-local: a cloud Claude Code session does
+the feature work and opens a PR, but a local Mac session still has to pull it, run the
+tests, build the Release app, and install it on the phone (over Wi-Fi as of 2026-09-26,
+see `CLAUDE.md`). The Mac is a build station the cloud session can't reach, so nothing
+ships without a laptop session. Stated 2026-09-26: "this was a limitation because we
+haven't invested enough in cloud setup yet."
+
+**Wanted.** A cloud path that takes a merged PR to an installable build on the phone
+with no laptop: the obvious shape is EAS Build producing a signed iOS build and
+TestFlight (or an EAS internal-distribution link) delivering it. The paid Apple
+Developer account already exists. Unknowns to settle first: EAS pricing tier vs build
+frequency, whether the datetimepicker pin survives EAS's `expo install` step (it must —
+see `expo.install.exclude`), and how the CI-side test run (`tsc`, `jest` under two time
+zones) gates the build.
+
+**Acceptance probe.** Merge a PR from a cloud session and, with the Mac closed, install
+the resulting build on the phone and see its build date in Settings → About.
